@@ -11,22 +11,25 @@ import requests
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 import plotly.express as px
 import numpy as np
-import sqlite3
+# import sqlite3 # No longer needed
+import psycopg2 # For PostgreSQL connection
+import psycopg2.extras # For dictionary cursor
 from datetime import datetime
-import json # Required for the new Level Shoes processing
+import json
 from collections import defaultdict
+import os # Potentially useful for local testing with env vars
 
 # --- App Configuration ---
-APP_VERSION = "2.4.11" # Updated version: UI Change - Inputs moved to main area
+APP_VERSION = "2.5.0" # Updated version: Migrated to PostgreSQL, UI inputs on main page
 st.set_page_config(layout="wide", page_title="Ounass vs Level Shoes PLP Comparison")
 
 # --- App Title and Info ---
 st.title(f"Ounass vs Level Shoes PLP Designer Comparison (v{APP_VERSION})")
 st.write("Enter Product Listing Page (PLP) URLs from Ounass and Level Shoes (Women's Shoes/Bags recommended) to extract and compare designer brand counts, or compare previously saved snapshots.")
-st.info("Ensure the URLs point to the relevant listing pages. For Ounass, the tool will attempt to load all designers. Level Shoes extraction uses the new __NEXT_DATA__ method.")
+st.info("Ensure the URLs point to the relevant listing pages. For Ounass, the tool will attempt to load all designers. Level Shoes extraction uses the new __NEXT_DATA__ method. Comparison history is now stored externally.")
 
 # --- Session State Initialization ---
-# (Keep this section as is - it initializes variables regardless of UI location)
+# (No changes needed here)
 if 'ounass_data' not in st.session_state: st.session_state.ounass_data = []
 if 'levelshoes_data' not in st.session_state: st.session_state.levelshoes_data = []
 if 'df_ounass' not in st.session_state: st.session_state.df_ounass = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned'])
@@ -43,118 +46,230 @@ if 'selected_url_key_for_time_comp' not in st.session_state: st.session_state.se
 if 'time_comp_meta1' not in st.session_state: st.session_state.time_comp_meta1 = {}
 if 'time_comp_meta2' not in st.session_state: st.session_state.time_comp_meta2 = {}
 
-
-# --- !!! MOVED URL Input Section (Main Area) !!! ---
-st.markdown("---") # Separator
+# --- URL Input Section (Main Area) ---
+st.markdown("---")
 st.subheader("Enter URLs to Compare")
-
 col1, col2 = st.columns(2)
 with col1:
-    st.session_state.ounass_url_input = st.text_input( # Removed .sidebar
-        "Ounass URL",
-        key="ounass_url_widget_main", # Use a distinct key
-        value=st.session_state.ounass_url_input,
-        placeholder="https://www.ounass.ae/..."
-    )
+    st.session_state.ounass_url_input = st.text_input("Ounass URL", key="ounass_url_widget_main", value=st.session_state.ounass_url_input, placeholder="https://www.ounass.ae/...")
 with col2:
-    st.session_state.levelshoes_url_input = st.text_input( # Removed .sidebar
-        "Level Shoes URL",
-        key="levelshoes_url_widget_main", # Use a distinct key
-        value=st.session_state.levelshoes_url_input,
-        placeholder="https://www.levelshoes.com/..."
-    )
+    st.session_state.levelshoes_url_input = st.text_input("Level Shoes URL", key="levelshoes_url_widget_main", value=st.session_state.levelshoes_url_input, placeholder="https://www.levelshoes.com/...")
+process_button = st.button("Process URLs", key="process_button_main")
+st.markdown("---")
 
-# Place button below inputs, perhaps centered
-# _, col_btn, _ = st.columns([1, 2, 1]) # Centering column approach
-# with col_btn:
-process_button = st.button( # Removed .sidebar
-        "Process URLs",
-        key="process_button_main", # Use a distinct key
-        # use_container_width=True # Optional: Makes button wider
-    )
+# --- Database Setup & Functions (PostgreSQL Version) ---
 
-st.markdown("---") # Separator before results
+# Initialize connection pool (optional but recommended for scaling)
+# For simplicity, we'll connect directly in each function for now.
+# Consider using st.connection for Streamlit >= 1.30
+# See: https://docs.streamlit.io/library/api-reference/connections/st.connection
 
-
-# --- Database Setup & Functions ---
-# (Keep this section as is)
-DB_NAME = "comparison_history.db"
-def get_db_connection(): conn = sqlite3.connect(DB_NAME); conn.row_factory = sqlite3.Row; return conn
-def init_db():
+@st.cache_resource # Cache the connection details check
+def get_connection_details():
+    """Retrieves connection details from Streamlit Secrets."""
     try:
-        conn = get_db_connection()
-        conn.execute('CREATE TABLE IF NOT EXISTS comparisons (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, ounass_url TEXT NOT NULL, levelshoes_url TEXT NOT NULL, comparison_data TEXT NOT NULL, comparison_name TEXT)')
+        # Check if running on Streamlit Cloud using secrets
+        if hasattr(st, 'secrets') and "connections" in st.secrets and "postgres" in st.secrets["connections"]:
+             return st.secrets["connections"]["postgres"]["url"]
+        else:
+            # Fallback for local development (using environment variables is better)
+            # Example: set DATABASE_URL environment variable locally
+             # db_url = os.environ.get("DATABASE_URL")
+             # if db_url:
+             #      return db_url
+             # else:
+                 st.error("Database connection details not found in Streamlit Secrets or environment variables.")
+                 return None
+    except Exception as e:
+        st.error(f"Error accessing connection details: {e}")
+        return None
+
+def get_db_connection():
+    """Establishes a connection to the PostgreSQL database."""
+    db_url = get_connection_details()
+    if not db_url:
+        return None
+    try:
+        conn = psycopg2.connect(db_url, sslmode='require') # sslmode often required for cloud DBs
+        return conn
+    except psycopg2.OperationalError as e:
+        st.error(f"Database Connection Error: Could not connect to the database. Check secrets/credentials. Details: {e}")
+        return None
+    except Exception as e:
+        st.error(f"Unexpected Database Connection Error: {e}")
+        return None
+
+def init_db():
+    """Initializes the database table if it doesn't exist."""
+    conn = get_db_connection()
+    if conn is None:
+        st.error("DB Initialization failed: Could not connect.")
+        return
+    try:
+        with conn.cursor() as cur:
+            # Use SERIAL for auto-incrementing ID in PostgreSQL
+            # Use JSONB for efficient JSON storage (or TEXT if JSONB is not available/preferred)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS comparisons (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    ounass_url TEXT NOT NULL,
+                    levelshoes_url TEXT NOT NULL,
+                    comparison_data JSONB NOT NULL,
+                    comparison_name TEXT
+                );
+            """)
         conn.commit()
-        conn.close()
-    except Exception as e: st.error(f"Fatal DB Init Error: {e}")
+    except Exception as e:
+        st.error(f"Fatal DB Init Error: {e}")
+        conn.rollback() # Rollback changes on error
+    finally:
+        if conn:
+            conn.close()
+
 def save_comparison(ounass_url, levelshoes_url, df_comparison):
+    """Saves comparison data to the PostgreSQL database."""
     if df_comparison is None or df_comparison.empty:
         st.error("Cannot save empty comparison data.")
         return False
+
+    conn = get_db_connection()
+    if conn is None: return False
+
     try:
-        conn = get_db_connection()
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now() # Use timezone-aware timestamp if possible
         df_to_save = df_comparison.copy()
         cols_to_save = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference', 'Brand_Cleaned', 'Brand_Ounass', 'Brand_LevelShoes']
         for col in cols_to_save:
             if col not in df_to_save.columns: df_to_save[col] = np.nan
-        data_json = df_to_save[cols_to_save].to_json(orient="records", date_format="iso")
-        conn.execute("INSERT INTO comparisons (timestamp, ounass_url, levelshoes_url, comparison_data, comparison_name) VALUES (?, ?, ?, ?, ?)",
-                       (timestamp, ounass_url, levelshoes_url, data_json, None))
+        # Convert DataFrame to JSON string for storage
+        # Use iso format for dates, handle potential NaN correctly for JSON
+        data_json = df_to_save[cols_to_save].to_json(orient="records", date_format="iso", default_handler=str) # Added default_handler
+
+        with conn.cursor() as cur:
+            sql = """
+                INSERT INTO comparisons (timestamp, ounass_url, levelshoes_url, comparison_data, comparison_name)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            # Use placeholders (%s) for safe query execution
+            cur.execute(sql, (timestamp, ounass_url, levelshoes_url, data_json, None)) # Name not used
         conn.commit()
-        conn.close()
         return True
     except Exception as e:
         st.error(f"Database Error: Could not save comparison - {e}")
+        conn.rollback()
         return False
+    finally:
+        if conn:
+            conn.close()
+
 def load_saved_comparisons_meta():
+    """Loads metadata (id, timestamp, urls) of saved comparisons."""
+    conn = get_db_connection()
+    if conn is None: return []
+    comparisons_list = []
     try:
-        conn = get_db_connection()
-        comparisons = conn.execute("SELECT id, timestamp, ounass_url, levelshoes_url, comparison_name FROM comparisons ORDER BY timestamp DESC").fetchall()
-        conn.close()
-        return [dict(row) for row in comparisons] if comparisons else []
+        # Use DictCursor to get results as dictionaries
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT id, timestamp, ounass_url, levelshoes_url, comparison_name
+                FROM comparisons ORDER BY timestamp DESC
+            """)
+            comparisons = cur.fetchall()
+            comparisons_list = [dict(row) for row in comparisons] if comparisons else []
     except Exception as e:
         st.error(f"Database Error: Could not load saved comparisons - {e}")
-        return []
+    finally:
+        if conn:
+            conn.close()
+    return comparisons_list
+
 def load_specific_comparison(comp_id):
+    """Loads the full data for a specific comparison ID."""
+    conn = get_db_connection()
+    if conn is None: return None, None
+    meta, df = None, None
     try:
-        conn = get_db_connection()
-        comp = conn.execute("SELECT timestamp, ounass_url, levelshoes_url, comparison_data, comparison_name FROM comparisons WHERE id = ?", (comp_id,)).fetchone()
-        conn.close()
-        if comp:
-            fallback_name = f"ID {comp_id} ({comp['timestamp']})"
-            meta = {"timestamp": comp["timestamp"], "ounass_url": comp["ounass_url"], "levelshoes_url": comp["levelshoes_url"], "name": comp["comparison_name"] or fallback_name, "id": comp_id}
-            df = pd.read_json(comp["comparison_data"], orient="records")
-            if 'Difference' not in df.columns and 'Ounass_Count' in df.columns and 'LevelShoes_Count' in df.columns:
-                df['Difference'] = df['Ounass_Count'] - df['LevelShoes_Count']
-            if 'Display_Brand' not in df.columns:
-                brand_ounass_col = 'Brand_Ounass' if 'Brand_Ounass' in df.columns else None
-                brand_ls_col = 'Brand_LevelShoes' if 'Brand_LevelShoes' in df.columns else None
-                brand_cleaned_col = 'Brand_Cleaned' if 'Brand_Cleaned' in df.columns else None
-                df['Display_Brand'] = np.where(df.get('Ounass_Count', 0) > 0,
-                                               df[brand_ounass_col] if brand_ounass_col else df.get(brand_cleaned_col),
-                                               df[brand_ls_col] if brand_ls_col else df.get(brand_cleaned_col))
-                df['Display_Brand'].fillna("Unknown", inplace=True)
-            return meta, df
-        else:
-            st.warning(f"Saved comparison with ID {comp_id} not found.")
-            return None, None
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            sql = """
+                SELECT id, timestamp, ounass_url, levelshoes_url, comparison_data, comparison_name
+                FROM comparisons WHERE id = %s
+            """
+            cur.execute(sql, (comp_id,))
+            comp = cur.fetchone()
+
+            if comp:
+                # Convert row to dictionary
+                comp_dict = dict(comp)
+                fallback_name = f"ID {comp_dict['id']} ({comp_dict['timestamp']})"
+                meta = {
+                    "timestamp": comp_dict["timestamp"],
+                    "ounass_url": comp_dict["ounass_url"],
+                    "levelshoes_url": comp_dict["levelshoes_url"],
+                    "name": comp_dict["comparison_name"] or fallback_name,
+                    "id": comp_dict["id"]
+                }
+                # Load JSON data - comparison_data might be stored as string or jsonb
+                json_data = comp_dict["comparison_data"]
+                if isinstance(json_data, str):
+                    # If stored as TEXT, parse it
+                    df = pd.read_json(io.StringIO(json_data), orient="records")
+                elif isinstance(json_data, list) or isinstance(json_data, dict) :
+                     # If stored as JSONB, pandas might load it directly (or requires json.loads first)
+                     # Often comes back as list of dicts from psycopg2 for JSONB
+                     df = pd.DataFrame(json_data)
+                else:
+                     st.error(f"Unexpected data type for comparison_data: {type(json_data)}")
+                     df = pd.DataFrame()
+
+
+                # --- Fallback logic for older saves (remains the same) ---
+                if not df.empty:
+                    if 'Difference' not in df.columns and 'Ounass_Count' in df.columns and 'LevelShoes_Count' in df.columns:
+                        df['Difference'] = df['Ounass_Count'] - df['LevelShoes_Count']
+                    if 'Display_Brand' not in df.columns:
+                        brand_ounass_col = 'Brand_Ounass' if 'Brand_Ounass' in df.columns else None
+                        brand_ls_col = 'Brand_LevelShoes' if 'Brand_LevelShoes' in df.columns else None
+                        brand_cleaned_col = 'Brand_Cleaned' if 'Brand_Cleaned' in df.columns else None
+                        df['Display_Brand'] = np.where(df.get('Ounass_Count', 0) > 0,
+                                                    df[brand_ounass_col] if brand_ounass_col else df.get(brand_cleaned_col),
+                                                    df[brand_ls_col] if brand_ls_col else df.get(brand_cleaned_col))
+                        df['Display_Brand'].fillna("Unknown", inplace=True)
+                # --- End Fallback logic ---
+            else:
+                st.warning(f"Saved comparison with ID {comp_id} not found.")
+
     except Exception as e:
         st.error(f"Database Error: Could not load comparison ID {comp_id} - {e}")
-        return None, None
+        # Optionally rollback if any transaction was started, although SELECT shouldn't need it
+        # conn.rollback()
+    finally:
+        if conn:
+            conn.close()
+    return meta, df
+
+
 def delete_comparison(comp_id):
+    """Deletes a specific comparison from the database."""
+    conn = get_db_connection()
+    if conn is None: return False
+    success = False
     try:
-        conn = get_db_connection()
-        conn.execute("DELETE FROM comparisons WHERE id = ?", (comp_id,))
+        with conn.cursor() as cur:
+            sql = "DELETE FROM comparisons WHERE id = %s"
+            cur.execute(sql, (comp_id,))
         conn.commit()
-        conn.close()
-        return True
+        success = True
     except Exception as e:
         st.error(f"Database Error: Could not delete comparison ID {comp_id} - {e}")
-        return False
+        conn.rollback()
+    finally:
+        if conn:
+            conn.close()
+    return success
 
 # --- Helper Functions ---
-# (Keep this section as is)
+# (Keep clean_brand_name and custom_scorer as is)
 def clean_brand_name(brand_name):
     if not isinstance(brand_name, str): return ""
     cleaned = brand_name.upper().replace('-', '').replace('&', '').replace('.', '').replace("'", '').replace(" ", '')
@@ -166,7 +281,7 @@ def custom_scorer(s1, s2):
     return max(scores)
 
 # --- HTML Processing Functions ---
-# (Keep these functions as is)
+# (Keep process_ounass_html and process_levelshoes_html as is)
 def process_ounass_html(html_content):
     """ Parses Ounass HTML to find the designer facet and extract brand names and counts. """
     soup = BeautifulSoup(html_content, 'html.parser'); data = []
@@ -281,21 +396,14 @@ def extract_info_from_url(url):
         return gender, category
     except Exception as e: return None, None
 
-# Initialize Database
-init_db()
-
 # --- Sidebar ---
-# (Sidebar now only contains Logo, Version, and Saved Comparisons)
 st.sidebar.image("https://1000logos.net/wp-content/uploads/2021/05/Ounass-logo.png", width=150)
 st.sidebar.caption(f"App Version: {APP_VERSION}")
-# Removed: st.sidebar.header("Enter URLs")
-# Removed: URL input text boxes
-# Removed: Process URLs button
 
 # --- Saved Comparisons Sidebar Section ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("Saved Comparisons")
-saved_comps_meta = load_saved_comparisons_meta()
+saved_comps_meta = load_saved_comparisons_meta() # Uses new DB function
 query_params = st.query_params.to_dict()
 viewing_saved_id = query_params.get("view_id", [None])[0]
 
@@ -306,6 +414,7 @@ if viewing_saved_id and st.session_state.get('confirm_delete_id') != viewing_sav
 if not saved_comps_meta:
     st.sidebar.caption("No comparisons saved yet.")
 else:
+    # (Keep grouping and display logic for saved comparisons as is, it uses the loaded meta)
     grouped_comps = defaultdict(list);
     for comp_meta in saved_comps_meta:
         url_key = (comp_meta.get('ounass_url',''), comp_meta.get('levelshoes_url',''))
@@ -325,8 +434,20 @@ else:
         is_expanded = st.session_state.selected_url_key_for_time_comp == url_key
 
         with st.sidebar.expander(expander_label, expanded=is_expanded):
-            comp_options = {f"{datetime.fromisoformat(comp['timestamp']).strftime('%Y-%m-%d %H:%M')} (ID: {comp['id']})": comp['id']
-                            for comp in sorted(comps_list, key=lambda x: x['timestamp'])}
+            # Format timestamp correctly from TIMESTAMPTZ if needed
+            comp_options = {}
+            for comp in sorted(comps_list, key=lambda x: x['timestamp']):
+                ts = comp['timestamp']
+                display_ts_str = "Invalid Date"
+                try:
+                    # Timestamps from PostgreSQL might be datetime objects already
+                    if isinstance(ts, datetime):
+                        display_ts_str = ts.strftime('%Y-%m-%d %H:%M')
+                    else: # Or strings that need parsing
+                        display_ts_str = datetime.fromisoformat(str(ts)).strftime('%Y-%m-%d %H:%M')
+                except Exception: pass # Keep 'Invalid Date' on parsing error
+                comp_options[f"{display_ts_str} (ID: {comp['id']})"] = comp['id']
+
             options_list = list(comp_options.keys()); ids_list = list(comp_options.values())
             if st.button("Select for Time Comparison", key=f"select_group_{idx}", use_container_width=True):
                  st.session_state.selected_url_key_for_time_comp = url_key
@@ -343,9 +464,11 @@ else:
                     if st.session_state.time_comp_id1 and st.session_state.time_comp_id2 and st.session_state.time_comp_id1 != st.session_state.time_comp_id2:
                         meta1, df1 = load_specific_comparison(st.session_state.time_comp_id1); meta2, df2 = load_specific_comparison(st.session_state.time_comp_id2)
                         if meta1 and df1 is not None and meta2 and df2 is not None:
-                            ts1 = datetime.fromisoformat(meta1['timestamp']); ts2 = datetime.fromisoformat(meta2['timestamp'])
+                            ts1 = meta1['timestamp']; ts2 = meta2['timestamp'] # Already datetime objects potentially
+                            if isinstance(ts1, str): ts1 = datetime.fromisoformat(ts1) # Ensure datetime
+                            if isinstance(ts2, str): ts2 = datetime.fromisoformat(ts2) # Ensure datetime
                             if ts1 > ts2: meta1, df1, meta2, df2 = meta2, df2, meta1, df1
-                            for df_check in [df1, df2]:
+                            for df_check in [df1, df2]: # Fallback logic remains same
                                 if 'Display_Brand' not in df_check.columns: df_check['Display_Brand'] = df_check['Brand_Ounass'].fillna(df_check['Brand_LevelShoes']).fillna(df_check.get('Brand_Cleaned', "Unknown")); df_check['Display_Brand'].fillna("Unknown", inplace=True)
                                 if 'Ounass_Count' not in df_check.columns: df_check['Ounass_Count'] = 0
                                 if 'LevelShoes_Count' not in df_check.columns: df_check['LevelShoes_Count'] = 0
@@ -359,43 +482,50 @@ else:
                     else: st.warning("Please select two different snapshots for comparison."); st.session_state.df_time_comparison = pd.DataFrame()
             st.markdown("---"); st.caption("View/Delete individual snapshots:")
             for comp_meta in comps_list:
-                 comp_id = comp_meta['id']; comp_ts_str = comp_meta['timestamp']
-                 try: display_ts = datetime.fromisoformat(comp_ts_str).strftime('%Y-%m-%d %H:%M')
-                 except: display_ts = comp_ts_str
-                 display_label = f"{display_ts} (ID: {comp_id})"; is_selected = str(comp_id) == viewing_saved_id; t_col1, t_col2 = st.columns([0.85, 0.15])
+                 comp_id = comp_meta['id']; ts = comp_meta['timestamp']; display_ts_str="Invalid Date"
+                 try:
+                     if isinstance(ts, datetime): display_ts_str = ts.strftime('%Y-%m-%d %H:%M')
+                     else: display_ts_str = datetime.fromisoformat(str(ts)).strftime('%Y-%m-%d %H:%M')
+                 except: pass
+                 display_label = f"{display_ts_str} (ID: {comp_id})"; is_selected = str(comp_id) == viewing_saved_id; t_col1, t_col2 = st.columns([0.85, 0.15])
                  with t_col1:
                     button_type = "primary" if is_selected else "secondary"
                     if st.button(display_label, key=f"view_detail_{comp_id}", type=button_type, use_container_width=True):
                          st.query_params["view_id"] = str(comp_id); st.session_state.confirm_delete_id = None
                          st.session_state.df_time_comparison = pd.DataFrame(); st.rerun()
                  with t_col2:
-                    if st.button("🗑️", key=f"del_detail_{comp_id}", help=f"Delete snapshot from {display_ts}", use_container_width=True):
+                    if st.button("🗑️", key=f"del_detail_{comp_id}", help=f"Delete snapshot from {display_ts_str}", use_container_width=True):
                          st.session_state.confirm_delete_id = comp_id; st.query_params.clear(); st.rerun()
 
+
 # --- Unified Display Function ---
-# (Keep this function as is, including the KeyError fix)
+# (Keep this function largely as is - it uses the DataFrames prepared earlier)
 def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_title_prefix="Overall Statistics", is_saved_view=False, saved_meta=None):
-    # This separator is now below the input area
-    # st.markdown("---") # Removed from here, placed earlier
     stats_title = stats_title_prefix; detected_gender, detected_category = None, None
+    # --- Title Section ---
     if is_saved_view and saved_meta:
          oun_g, oun_c = extract_info_from_url(saved_meta.get('ounass_url', '')); ls_g, ls_c = extract_info_from_url(saved_meta.get('levelshoes_url', ''))
          if oun_g or ls_g: detected_gender = oun_g or ls_g
          if oun_c or ls_c: detected_category = oun_c or ls_c
-         st.subheader(f"Viewing Saved Comparison ({saved_meta.get('timestamp', 'N/A')})")
+         ts = saved_meta.get('timestamp', 'N/A'); display_ts_str="N/A"
+         try:
+             if isinstance(ts, datetime): display_ts_str = ts.strftime('%Y-%m-%d %H:%M:%S')
+             else: display_ts_str = datetime.fromisoformat(str(ts)).strftime('%Y-%m-%d %H:%M:%S')
+         except: pass
+         st.subheader(f"Viewing Saved Comparison ({display_ts_str})")
          st.caption(f"Ounass URL: `{saved_meta.get('ounass_url', 'N/A')}`")
          st.caption(f"Level Shoes URL: `{saved_meta.get('levelshoes_url', 'N/A')}`")
-         # Removed st.markdown("---") here, stats follow directly
     else:
         url_for_stats = st.session_state.get('processed_ounass_url') or st.session_state.get('ounass_url_input')
         if not url_for_stats: url_for_stats = st.session_state.get('levelshoes_url_input')
         if url_for_stats: g_live, c_live = extract_info_from_url(url_for_stats); detected_gender = g_live; detected_category = c_live
-        # No extra markdown before stats in live view either
 
     if detected_gender and detected_category: stats_title = f"{stats_title_prefix} - {detected_gender} / {detected_category}"
     elif detected_gender: stats_title = f"{stats_title_prefix} - {detected_gender}"
     elif detected_category: stats_title = f"{stats_title_prefix} - {detected_category}"
+    # --- End Title Section ---
 
+    # --- Save Button & Stats Title ---
     if not is_saved_view and df_comparison_sorted is not None and not df_comparison_sorted.empty:
         stat_title_col, stat_save_col = st.columns([0.8, 0.2])
         with stat_title_col: st.subheader(stats_title)
@@ -404,12 +534,13 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
             if st.button("💾 Save", key="save_live_comp_confirm", help="Save current comparison results", use_container_width=True):
                 oun_url = st.session_state.get('processed_ounass_url', st.session_state.get('ounass_url_input',''))
                 ls_url = st.session_state.get('levelshoes_url_input', ''); df_save = st.session_state.df_comparison_sorted
-                if save_comparison(oun_url, ls_url, df_save):
+                if save_comparison(oun_url, ls_url, df_save): # Calls new DB function
                     st.success(f"Comparison saved! (Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
                     st.session_state.confirm_delete_id = None; st.rerun()
     else: st.subheader(stats_title)
+    # --- End Save Button & Stats Title ---
 
-    # --- UPDATED Statistics Calculation ---
+    # --- Statistics Calculation (Keep the robust version) ---
     df_o_safe = df_ounass if df_ounass is not None and not df_ounass.empty else pd.DataFrame()
     df_l_safe = df_levelshoes if df_levelshoes is not None and not df_levelshoes.empty else pd.DataFrame()
     df_c_safe = df_comparison_sorted if df_comparison_sorted is not None and not df_comparison_sorted.empty else pd.DataFrame()
@@ -429,23 +560,22 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
         common_brands_count = len(df_c_safe[(df_c_safe['Ounass_Count'] > 0) & (df_c_safe['LevelShoes_Count'] > 0)])
         ounass_only_count = len(df_c_safe[(df_c_safe['Ounass_Count'] > 0) & (df_c_safe['LevelShoes_Count'] == 0)])
         levelshoes_only_count = len(df_c_safe[(df_c_safe['Ounass_Count'] == 0) & (df_c_safe['LevelShoes_Count'] > 0)])
-    # --- End of UPDATED Statistics Calculation ---
+    # --- End Statistics Calculation ---
 
+    # --- Display Stats Metrics ---
     stat_col1, stat_col2, stat_col3 = st.columns(3)
     with stat_col1: st.metric("Ounass Brands", f"{total_ounass_brands:,}"); st.metric("Ounass Products", f"{total_ounass_products:,}")
     with stat_col2: st.metric("Level Shoes Brands", f"{total_levelshoes_brands:,}"); st.metric("Level Shoes Products", f"{total_levelshoes_products:,}")
     with stat_col3:
         if not df_c_safe.empty and 'Ounass_Count' in df_c_safe.columns and 'LevelShoes_Count' in df_c_safe.columns:
-            st.metric("Common Brands", f"{common_brands_count:,}")
-            st.metric("Ounass Only", f"{ounass_only_count:,}")
-            st.metric("Level Shoes Only", f"{levelshoes_only_count:,}")
+            st.metric("Common Brands", f"{common_brands_count:,}"); st.metric("Ounass Only", f"{ounass_only_count:,}"); st.metric("Level Shoes Only", f"{levelshoes_only_count:,}")
         else:
              st.metric("Common Brands", "N/A"); st.metric("Ounass Only", "N/A"); st.metric("Level Shoes Only", "N/A")
-             if not is_saved_view and (st.session_state.get('ounass_url_input') or st.session_state.get('levelshoes_url_input')):
-                 st.caption("Comparison requires data from both sites.")
-    st.write(""); st.markdown("---") # Separator after stats
+             if not is_saved_view and (st.session_state.get('ounass_url_input') or st.session_state.get('levelshoes_url_input')): st.caption("Comparison requires data from both sites.")
+    st.write(""); st.markdown("---")
+    # --- End Display Stats Metrics ---
 
-    # Individual Results Display (Only in Live View)
+    # --- Individual Results Display (Only in Live View) ---
     if not is_saved_view:
         col1, col2 = st.columns(2)
         with col1:
@@ -455,9 +585,9 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
                  st.dataframe(df_display[['Brand', 'Count']], height=400, use_container_width=True)
                  csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0)
                  st.download_button("Download Ounass List (CSV)", csv_buffer.getvalue(), 'ounass_brands.csv', 'text/csv', key='ounass_dl_disp')
-            elif process_button and st.session_state.ounass_url_input: st.warning("No data extracted from Ounass.")
-            elif not process_button and st.session_state.ounass_url_input: st.info("Click 'Process URLs' to fetch Ounass data.")
-            else: st.info("Enter Ounass URL in the input field above.") # Updated text
+            # elif process_button and st.session_state.ounass_url_input: st.warning("No data extracted from Ounass.") # Already handled by main flow warnings
+            # elif not process_button and st.session_state.ounass_url_input: st.info("Click 'Process URLs' to fetch Ounass data.")
+            elif not st.session_state.get('df_ounass_processed', False): st.info("Enter Ounass URL and click 'Process URLs'.") # Simpler message
         with col2:
             st.subheader("Level Shoes Results")
             if df_levelshoes is not None and not df_levelshoes.empty and 'Brand' in df_levelshoes.columns and 'Count' in df_levelshoes.columns:
@@ -465,17 +595,17 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
                  st.dataframe(df_display[['Brand', 'Count']], height=400, use_container_width=True)
                  csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0)
                  st.download_button("Download Level Shoes List (CSV)", csv_buffer.getvalue(), 'levelshoes_brands.csv', 'text/csv', key='ls_dl_disp')
-            elif process_button and st.session_state.levelshoes_url_input: st.warning("No data extracted from Level Shoes.")
-            elif not process_button and st.session_state.levelshoes_url_input: st.info("Click 'Process URLs' to fetch Level Shoes data.")
-            else: st.info("Enter Level Shoes URL in the input field above.") # Updated text
+            # elif process_button and st.session_state.levelshoes_url_input: st.warning("No data extracted from Level Shoes.") # Already handled by main flow warnings
+            # elif not process_button and st.session_state.levelshoes_url_input: st.info("Click 'Process URLs' to fetch Level Shoes data.")
+            elif not st.session_state.get('df_levelshoes_processed', False): st.info("Enter Level Shoes URL and click 'Process URLs'.") # Simpler message
+    # --- End Individual Results Display ---
 
-    # Comparison Section (Show if comparison data exists)
-    # (Keep comparison section logic as is)
+    # --- Comparison Section ---
+    # (Keep comparison display logic as is)
     if df_comparison_sorted is not None and not df_comparison_sorted.empty:
         if not is_saved_view: st.markdown("---")
         st.subheader("Ounass vs Level Shoes Brand Comparison")
-        df_display = df_comparison_sorted.copy(); df_display.index += 1
-        display_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']
+        df_display = df_comparison_sorted.copy(); df_display.index += 1; display_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']
         missing_cols = [col for col in display_cols if col not in df_display.columns]
         if missing_cols: st.warning(f"Comparison table is missing expected columns: {', '.join(missing_cols)}"); st.dataframe(df_display, height=500, use_container_width=True)
         else: st.dataframe(df_display[display_cols], height=500, use_container_width=True)
@@ -487,67 +617,55 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
         with viz_col2:
             st.write("**Top 10 Largest Differences (Count)**")
             if 'Difference' in df_comparison_sorted.columns and 'Display_Brand' in df_comparison_sorted.columns:
-                top_pos = df_comparison_sorted[df_comparison_sorted['Difference'] > 0].nlargest(5, 'Difference'); top_neg = df_comparison_sorted[df_comparison_sorted['Difference'] < 0].nsmallest(5, 'Difference')
-                top_diff = pd.concat([top_pos, top_neg]).sort_values('Difference', ascending=False)
+                top_pos = df_comparison_sorted[df_comparison_sorted['Difference'] > 0].nlargest(5, 'Difference'); top_neg = df_comparison_sorted[df_comparison_sorted['Difference'] < 0].nsmallest(5, 'Difference'); top_diff = pd.concat([top_pos, top_neg]).sort_values('Difference', ascending=False)
                 if not top_diff.empty: fig_diff = px.bar(top_diff, x='Display_Brand', y='Difference', title="Largest Differences (Ounass - Level Shoes)", labels={'Display_Brand': 'Brand', 'Difference': 'Product Count Difference'}, color='Difference', color_continuous_scale=px.colors.diverging.RdBu); fig_diff.update_layout(xaxis_title=None); st.plotly_chart(fig_diff, use_container_width=True)
                 else: st.info("No significant differences found for the chart.")
             else: st.info("Difference data unavailable for chart.")
         st.markdown("---"); st.subheader("Top 15 Brands Comparison (Total Products)")
         if not df_comparison_sorted.empty and all(c in df_comparison_sorted.columns for c in ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count']):
-            df_comp_copy = df_comparison_sorted.copy(); df_comp_copy['Total_Count'] = df_comp_copy['Ounass_Count'] + df_comp_copy['LevelShoes_Count']; top_n = 15
-            top_brands = df_comp_copy.nlargest(top_n, 'Total_Count')
+            df_comp_copy = df_comparison_sorted.copy(); df_comp_copy['Total_Count'] = df_comp_copy['Ounass_Count'] + df_comp_copy['LevelShoes_Count']; top_n = 15; top_brands = df_comp_copy.nlargest(top_n, 'Total_Count')
             if not top_brands.empty:
                 melted = top_brands.melt(id_vars='Display_Brand', value_vars=['Ounass_Count', 'LevelShoes_Count'], var_name='Website', value_name='Product Count'); melted['Website'] = melted['Website'].str.replace('_Count', '').str.replace('LevelShoes','Level Shoes');
                 fig_top = px.bar(melted, x='Display_Brand', y='Product Count', color='Website', barmode='group', title=f"Top {top_n} Brands by Total Products", labels={'Display_Brand': 'Brand'}, category_orders={"Display_Brand": top_brands['Display_Brand'].tolist()}); fig_top.update_layout(xaxis_title=None); st.plotly_chart(fig_top, use_container_width=True)
             else: st.info(f"Not enough data for Top {top_n} brands chart.")
         else: st.info(f"Comparison data unavailable for Top {top_n} chart.")
-        st.markdown("---"); col_comp1, col_comp2 = st.columns(2)
-        req_cols_exist = all(c in df_comparison_sorted.columns for c in ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference'])
+        st.markdown("---"); col_comp1, col_comp2 = st.columns(2); req_cols_exist = all(c in df_comparison_sorted.columns for c in ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference'])
         with col_comp1:
             st.subheader("Brands in Ounass Only")
-            if req_cols_exist:
-                df_f = df_comparison_sorted[(df_comparison_sorted['LevelShoes_Count'] == 0) & (df_comparison_sorted['Ounass_Count'] > 0)]
-                if not df_f.empty: df_d = df_f[['Display_Brand', 'Ounass_Count']].sort_values('Ounass_Count', ascending=False).reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True)
-                else: st.info("No unique Ounass brands found in this comparison.")
+            if req_cols_exist: df_f = df_comparison_sorted[(df_comparison_sorted['LevelShoes_Count'] == 0) & (df_comparison_sorted['Ounass_Count'] > 0)];
+            if req_cols_exist and not df_f.empty: df_d = df_f[['Display_Brand', 'Ounass_Count']].sort_values('Ounass_Count', ascending=False).reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True)
+            elif req_cols_exist: st.info("No unique Ounass brands found in this comparison.")
             else: st.info("Data unavailable.")
         with col_comp2:
             st.subheader("Brands in Level Shoes Only")
-            if req_cols_exist:
-                df_f = df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] == 0) & (df_comparison_sorted['LevelShoes_Count'] > 0)]
-                if not df_f.empty: df_d = df_f[['Display_Brand', 'LevelShoes_Count']].sort_values('LevelShoes_Count', ascending=False).reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True)
-                else: st.info("No unique Level Shoes brands found in this comparison.")
+            if req_cols_exist: df_f = df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] == 0) & (df_comparison_sorted['LevelShoes_Count'] > 0)];
+            if req_cols_exist and not df_f.empty: df_d = df_f[['Display_Brand', 'LevelShoes_Count']].sort_values('LevelShoes_Count', ascending=False).reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True)
+            elif req_cols_exist: st.info("No unique Level Shoes brands found in this comparison.")
             else: st.info("Data unavailable.")
         st.markdown("---"); col_comp3, col_comp4 = st.columns(2)
         with col_comp3:
             st.subheader("Common Brands: Ounass > Level Shoes")
-            if req_cols_exist:
-                df_f = df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] > 0) & (df_comparison_sorted['LevelShoes_Count'] > 0) & (df_comparison_sorted['Difference'] > 0)].sort_values('Difference', ascending=False)
-                if not df_f.empty: df_d = df_f[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']].reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True)
-                else: st.info("No common brands found where Ounass has more products.")
+            if req_cols_exist: df_f = df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] > 0) & (df_comparison_sorted['LevelShoes_Count'] > 0) & (df_comparison_sorted['Difference'] > 0)].sort_values('Difference', ascending=False)
+            if req_cols_exist and not df_f.empty: df_d = df_f[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']].reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True)
+            elif req_cols_exist: st.info("No common brands found where Ounass has more products.")
             else: st.info("Data unavailable.")
         with col_comp4:
             st.subheader("Common Brands: Level Shoes > Ounass")
-            if req_cols_exist:
-                df_f = df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] > 0) & (df_comparison_sorted['LevelShoes_Count'] > 0) & (df_comparison_sorted['Difference'] < 0)].sort_values('Difference', ascending=True)
-                if not df_f.empty: df_d = df_f[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']].reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True)
-                else: st.info("No common brands found where Level Shoes has more products.")
+            if req_cols_exist: df_f = df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] > 0) & (df_comparison_sorted['LevelShoes_Count'] > 0) & (df_comparison_sorted['Difference'] < 0)].sort_values('Difference', ascending=True)
+            if req_cols_exist and not df_f.empty: df_d = df_f[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']].reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True)
+            elif req_cols_exist: st.info("No common brands found where Level Shoes has more products.")
             else: st.info("Data unavailable.")
-        st.markdown("---")
-        csv_buffer_comparison = io.StringIO(); dl_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']
+        st.markdown("---"); csv_buffer_comparison = io.StringIO(); dl_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']
         if req_cols_exist:
             df_comparison_sorted[dl_cols].to_csv(csv_buffer_comparison, index=False, encoding='utf-8'); csv_buffer_comparison.seek(0)
-            download_label = f"Download {'Saved' if is_saved_view else 'Current'} Comparison (CSV)"
-            view_id_part = saved_meta['id'] if is_saved_view and saved_meta else 'live'
-            download_key = f"comp_dl_button_{'saved' if is_saved_view else 'live'}_{view_id_part}"
-            filename_desc = f"{detected_gender or 'All'}_{detected_category or 'All'}".replace(' > ','-').replace(' ','_').lower()
-            download_filename = f"brand_comparison_{filename_desc}_{view_id_part}.csv".replace('?_?', 'all_all')
+            download_label = f"Download {'Saved' if is_saved_view else 'Current'} Comparison (CSV)"; view_id_part = saved_meta['id'] if is_saved_view and saved_meta else 'live'; download_key = f"comp_dl_button_{'saved' if is_saved_view else 'live'}_{view_id_part}"
+            filename_desc = f"{detected_gender or 'All'}_{detected_category or 'All'}".replace(' > ','-').replace(' ','_').lower(); download_filename = f"brand_comparison_{filename_desc}_{view_id_part}.csv".replace('?_?', 'all_all')
             st.download_button(download_label, csv_buffer_comparison.getvalue(), download_filename, 'text/csv', key=download_key)
         else: st.warning("Could not generate download file due to missing comparison columns.")
-    elif process_button and not is_saved_view:
+    # --- End Comparison Section ---
+    elif process_button and not is_saved_view: # Process clicked, comparison failed
         st.markdown("---")
-        st.warning("Comparison could not be generated. Check if data was successfully extracted from both URLs in the sections above.")
-    # elif not process_button and not is_saved_view and df_o_safe.empty and df_l_safe.empty :
-        # Initial state message handled in the main flow now
+        st.warning("Comparison could not be generated. Check individual results sections above for extraction status.")
 
 # --- Time Comparison Display Function ---
 # (Keep this function as is)
@@ -555,8 +673,11 @@ def display_time_comparison_results(df_time_comp, meta1, meta2):
     st.markdown("---"); st.subheader("Snapshot Comparison Over Time")
     ts_format = '%Y-%m-%d %H:%M'; ts1_str, ts2_str = "N/A", "N/A"; id1, id2 = meta1.get('id','N/A'), meta2.get('id','N/A')
     try:
-        if meta1 and 'timestamp' in meta1: ts1_str = datetime.fromisoformat(meta1['timestamp']).strftime(ts_format)
-        if meta2 and 'timestamp' in meta2: ts2_str = datetime.fromisoformat(meta2['timestamp']).strftime(ts_format)
+        ts1 = meta1.get('timestamp'); ts2 = meta2.get('timestamp')
+        if isinstance(ts1, datetime): ts1_str = ts1.strftime(ts_format)
+        elif isinstance(ts1, str): ts1_str = datetime.fromisoformat(ts1).strftime(ts_format)
+        if isinstance(ts2, datetime): ts2_str = ts2.strftime(ts_format)
+        elif isinstance(ts2, str): ts2_str = datetime.fromisoformat(ts2).strftime(ts_format)
         st.markdown(f"Comparing **Snapshot 1** (`{ts1_str}`, ID: {id1}) **vs** **Snapshot 2** (`{ts2_str}`, ID: {id2})")
     except Exception as e: st.warning(f"Error formatting timestamps: {e}"); st.markdown(f"Comparing Snapshot 1 (ID: {id1}) vs Snapshot 2 (ID: {id2})")
     with st.expander("Show URLs for Compared Snapshots"):
@@ -592,7 +713,8 @@ def display_time_comparison_results(df_time_comp, meta1, meta2):
         st.write("**Level Shoes Changes**"); displayed_any_l = False; rename_new_drop = {'LevelShoes_Count_T1':'Was', 'LevelShoes_Count_T2':'Now'}; rename_inc_dec = {'LevelShoes_Count_T1':'Was', 'LevelShoes_Count_T2':'Now', 'LevelShoes_Change':'Change'}
         if display_change_df(new_l, "New", None, 'LevelShoes_Count_T2', None, 'Now', False, rename_new_drop): displayed_any_l = True
         if display_change_df(drop_l, "Dropped", 'LevelShoes_Count_T1', None, None, 'Was', False, rename_new_drop): displayed_any_l = True
-        if display_change_df(inc_l, "Increased", 'LevelShoes_ArtT1', 'LevelShoes_Count_T2', 'LevelShoes_Change', 'Change', False, rename_inc_dec): displayed_any_l = True # Typo corrected
+        # Corrected column name 'LevelShoes_ArtT1' to 'LevelShoes_Count_T1'
+        if display_change_df(inc_l, "Increased", 'LevelShoes_Count_T1', 'LevelShoes_Count_T2', 'LevelShoes_Change', 'Change', False, rename_inc_dec): displayed_any_l = True
         dec_l_display = dec_l[dec_l['LevelShoes_Count_T2'] > 0]
         if display_change_df(dec_l_display, "Decreased", 'LevelShoes_Count_T1', 'LevelShoes_Count_T2', 'LevelShoes_Change', 'Change', True, rename_inc_dec): displayed_any_l = True
         if not displayed_any_l: st.info("No significant changes detected for Level Shoes between these snapshots.")
@@ -603,13 +725,17 @@ def display_time_comparison_results(df_time_comp, meta1, meta2):
     else: st.warning("Could not generate download file for time comparison due to missing data.")
 
 # --- Main Application Flow ---
-# (Keep this logic flow as is)
+
+# Initialize the database table at the start if it doesn't exist
+# This should ideally happen only once, but checking here is safe.
+init_db()
+
 confirm_id = st.session_state.get('confirm_delete_id')
 if confirm_id:
     st.warning(f"Are you sure you want to delete comparison ID {confirm_id}?"); col_confirm, col_cancel, _ = st.columns([1,1,3])
     with col_confirm:
         if st.button("Yes, Delete", type="primary", key=f"confirm_delete_{confirm_id}"):
-            if delete_comparison(confirm_id): st.success(f"Comparison ID {confirm_id} deleted.")
+            if delete_comparison(confirm_id): st.success(f"Comparison ID {confirm_id} deleted.") # Calls new DB function
             else: st.error("Deletion failed.")
             st.session_state.confirm_delete_id = None; st.query_params.clear(); st.rerun()
     with col_cancel:
@@ -617,15 +743,21 @@ if confirm_id:
 elif 'df_time_comparison' in st.session_state and not st.session_state.df_time_comparison.empty:
     display_time_comparison_results(st.session_state.df_time_comparison, st.session_state.get('time_comp_meta1',{}), st.session_state.get('time_comp_meta2',{}))
 elif viewing_saved_id:
-    saved_meta, saved_df = load_specific_comparison(viewing_saved_id)
+    saved_meta, saved_df = load_specific_comparison(viewing_saved_id) # Calls new DB function
     if saved_meta and saved_df is not None: display_all_results(None, None, saved_df, stats_title_prefix="Saved Comparison Details", is_saved_view=True, saved_meta=saved_meta)
     else: st.error(f"Could not load comparison ID: {viewing_saved_id}. It might have been deleted or there was a load error.");
     if st.button("Clear Invalid Saved View URL"): st.query_params.clear(); st.rerun()
 else:
-    if process_button: # Check if the button in the main area was clicked
+    # This block now primarily controls the processing logic when the main button is clicked
+    if process_button:
+        # Reset states
         st.session_state.df_ounass = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']); st.session_state.df_levelshoes = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned'])
         st.session_state.ounass_data = []; st.session_state.levelshoes_data = []; st.session_state.df_comparison_sorted = pd.DataFrame(); st.session_state.processed_ounass_url = ''
         st.session_state.df_time_comparison = pd.DataFrame(); st.session_state.time_comp_id1 = None; st.session_state.time_comp_id2 = None; st.session_state.selected_url_key_for_time_comp = None; st.session_state.time_comp_meta1 = {}; st.session_state.time_comp_meta2 = {}
+        st.session_state.df_ounass_processed = False # Flag to track processing attempt
+        st.session_state.df_levelshoes_processed = False # Flag to track processing attempt
+
+        # Process Ounass
         if st.session_state.ounass_url_input:
             with st.spinner("Processing Ounass URL..."):
                 st.session_state.processed_ounass_url = ensure_ounass_full_list_parameter(st.session_state.ounass_url_input)
@@ -635,9 +767,12 @@ else:
                     if st.session_state.ounass_data:
                          try:
                              st.session_state.df_ounass = pd.DataFrame(st.session_state.ounass_data)
-                             if not st.session_state.df_ounass.empty: st.session_state.df_ounass['Brand_Cleaned'] = st.session_state.df_ounass['Brand'].apply(clean_brand_name)
+                             if not st.session_state.df_ounass.empty:
+                                 st.session_state.df_ounass['Brand_Cleaned'] = st.session_state.df_ounass['Brand'].apply(clean_brand_name)
+                                 st.session_state.df_ounass_processed = True # Mark as processed successfully
                              else: st.warning("Ounass data extracted but resulted in an empty list.")
-                         except Exception as e: st.error(f"Error creating Ounass DataFrame: {e}"); st.session_state.df_ounass = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned'])
+                         except Exception as e: st.error(f"Error creating Ounass DataFrame: {e}")
+        # Process Level Shoes
         if st.session_state.levelshoes_url_input:
              with st.spinner("Processing Level Shoes URL (using __NEXT_DATA__)..."):
                 levelshoes_html_content = fetch_html_content(st.session_state.levelshoes_url_input)
@@ -646,17 +781,21 @@ else:
                     if st.session_state.levelshoes_data:
                         try:
                             st.session_state.df_levelshoes = pd.DataFrame(st.session_state.levelshoes_data)
-                            if not st.session_state.df_levelshoes.empty: st.session_state.df_levelshoes['Brand_Cleaned'] = st.session_state.df_levelshoes['Brand'].apply(clean_brand_name)
+                            if not st.session_state.df_levelshoes.empty:
+                                st.session_state.df_levelshoes['Brand_Cleaned'] = st.session_state.df_levelshoes['Brand'].apply(clean_brand_name)
+                                st.session_state.df_levelshoes_processed = True # Mark as processed successfully
                             else: st.warning("Level Shoes data extracted but resulted in an empty list.")
-                        except Exception as e: st.error(f"Error creating Level Shoes DataFrame: {e}"); st.session_state.df_levelshoes = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned'])
-        if ('df_ounass' in st.session_state and not st.session_state.df_ounass.empty and 'df_levelshoes' in st.session_state and not st.session_state.df_levelshoes.empty):
+                        except Exception as e: st.error(f"Error creating Level Shoes DataFrame: {e}")
+
+        # Create Comparison (if both processed successfully)
+        if st.session_state.df_ounass_processed and st.session_state.df_levelshoes_processed:
             with st.spinner("Generating comparison..."):
                 try:
                     df_o = st.session_state.df_ounass[['Brand','Count','Brand_Cleaned']].copy(); df_l = st.session_state.df_levelshoes[['Brand','Count','Brand_Cleaned']].copy()
                     df_comp = pd.merge(df_o, df_l, on='Brand_Cleaned', how='outer', suffixes=('_Ounass', '_LevelShoes'))
                     df_comp['Ounass_Count'] = df_comp['Count_Ounass'].fillna(0).astype(int); df_comp['LevelShoes_Count'] = df_comp['Count_LevelShoes'].fillna(0).astype(int); df_comp['Difference'] = df_comp['Ounass_Count'] - df_comp['LevelShoes_Count']
                     df_comp['Display_Brand'] = np.where(df_comp['Ounass_Count'] > 0, df_comp['Brand_Ounass'], df_comp['Brand_LevelShoes']); df_comp['Display_Brand'].fillna(df_comp['Brand_Cleaned'], inplace=True); df_comp['Display_Brand'].fillna("Unknown", inplace=True)
-                    final_cols = ['Display_Brand','Brand_Cleaned','Ounass_Count','LevelShoes_Count','Difference','Brand_Ounass','Brand_LevelShoes']
+                    final_cols = ['Display_Brand','Brand_Cleaned','Ounass_Count','LevelShoes_Count','Difference','Brand_Ounass','Brand_LevelShoes'];
                     for col in final_cols:
                         if col not in df_comp.columns: df_comp[col] = np.nan
                     df_comp['Total_Count'] = df_comp['Ounass_Count'] + df_comp['LevelShoes_Count']
@@ -664,21 +803,21 @@ else:
                 except Exception as merge_e: st.error(f"Error during comparison merge: {merge_e}"); st.session_state.df_comparison_sorted = pd.DataFrame()
         else:
              st.session_state.df_comparison_sorted = pd.DataFrame()
-             if process_button:
-                 if st.session_state.ounass_url_input and ('df_ounass' not in st.session_state or st.session_state.df_ounass.empty): st.warning("Could not process Ounass data. Comparison not generated.")
-                 if st.session_state.levelshoes_url_input and ('df_levelshoes' not in st.session_state or st.session_state.df_levelshoes.empty): st.warning("Could not process Level Shoes data. Comparison not generated.")
-        st.rerun() # Rerun after processing to display results
+             if process_button: # Show warnings only if button was pressed
+                 if st.session_state.ounass_url_input and not st.session_state.df_ounass_processed: st.warning("Could not process Ounass data. Comparison not generated.")
+                 if st.session_state.levelshoes_url_input and not st.session_state.df_levelshoes_processed: st.warning("Could not process Level Shoes data. Comparison not generated.")
 
-    # Display current live data (or empty state)
+        st.rerun() # Rerun after processing to display results/warnings immediately
+
+    # Display current live data (or empty state if process button not clicked)
     df_ounass_live = st.session_state.get('df_ounass', pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']))
     df_levelshoes_live = st.session_state.get('df_levelshoes', pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']))
     df_comparison_sorted_live = st.session_state.get('df_comparison_sorted', pd.DataFrame())
+
+    # Call display function for live data (or lack thereof)
     display_all_results(df_ounass_live, df_levelshoes_live, df_comparison_sorted_live, stats_title_prefix="Current Comparison")
 
-    # Show initial message only if app just loaded and process button wasn't clicked
-    if not process_button and df_ounass_live.empty and df_levelshoes_live.empty and df_comparison_sorted_live.empty:
-        # This message is implicitly handled now by the info messages under "Ounass Results" and "Level Shoes Results" when empty
-        pass # st.info("Enter URLs above and click 'Process URLs' or select a saved comparison from the sidebar.")
+    # Initial message is now implicitly handled by the info messages under Ounass/LevelShoes results when empty
 
 
 # --- END OF UPDATED FILE ---
