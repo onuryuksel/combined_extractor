@@ -362,75 +362,91 @@ else:
                     if st.button("🗑️", key=f"del_detail_{comp_id}", help=f"Delete snapshot from {display_ts}", use_container_width=True): st.session_state.confirm_delete_id = comp_id; st.query_params.clear(); st.rerun()
 
 # --- Unified Display Function ---
-def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_title_prefix="Overall Statistics", is_saved_view=False, saved_meta=None):
-    st.markdown("---")
-    stats_title = stats_title_prefix
-    detected_gender, detected_category = None, None
+    def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_title_prefix="Overall Statistics", is_saved_view=False, saved_meta=None):
+        # ... (fonksiyonun başındaki kod aynı kalacak - st.markdown, stats_title, URL info vs.) ...
 
-    if is_saved_view and saved_meta:
-         oun_g, oun_c = extract_info_from_url(saved_meta.get('ounass_url', '')); ls_g, ls_c = extract_info_from_url(saved_meta.get('levelshoes_url', ''))
-         if oun_g or ls_g: detected_gender = oun_g or ls_g
-         if oun_c or ls_c: detected_category = oun_c or ls_c # Prefer Ounass if both available, but take either
-         st.subheader(f"Viewing Saved Comparison ({saved_meta['timestamp']})")
-         st.caption(f"Ounass URL: `{saved_meta['ounass_url']}`")
-         st.caption(f"Level Shoes URL: `{saved_meta['levelshoes_url']}`")
-         st.markdown("---")
-    else: # Live view
-        url_for_stats = st.session_state.get('processed_ounass_url') or st.session_state.get('ounass_url_input')
-        if not url_for_stats: url_for_stats = st.session_state.get('levelshoes_url_input') # Fallback to LS URL if Ounass not entered
-        if url_for_stats:
-            g_live, c_live = extract_info_from_url(url_for_stats)
-            if g_live is not None: detected_gender = g_live
-            if c_live is not None: detected_category = c_live
+        # Save Button Area (only in live view with results)
+        # ... (Save Button Area kodu aynı kalacak) ...
+        else: # Saved view or no comparison data yet
+            st.subheader(stats_title) # Display title even if no stats yet
 
-    if detected_gender and detected_category: stats_title = f"{stats_title_prefix} - {detected_gender} / {detected_category}"
-    elif detected_gender: stats_title = f"{stats_title_prefix} - {detected_gender}"
-    elif detected_category: stats_title = f"{stats_title_prefix} - {detected_category}"
+        # --- !!! GÜNCELLENMİŞ İSTATİSTİK HESAPLAMA BÖLÜMÜ !!! ---
+        # Calculate stats safely, checking for column existence
 
-    # Save Button Area (only in live view with results)
-    if not is_saved_view and not df_comparison_sorted.empty:
-        stat_title_col, stat_save_col = st.columns([0.8, 0.2])
-        with stat_title_col: st.subheader(stats_title)
-        with stat_save_col:
-            st.write("") # Spacer
-            if st.button("💾 Save", key="save_live_comp_confirm", help="Save current comparison results", use_container_width=True):
-                oun_url = st.session_state.get('processed_ounass_url', st.session_state.get('ounass_url_input','')); # Ensure we save the processed Ounass URL if available
-                ls_url = st.session_state.get('levelshoes_url_input', ''); df_save = st.session_state.df_comparison_sorted
-                if save_comparison(oun_url, ls_url, df_save):
-                    st.success(f"Comparison saved! (Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
-                    st.session_state.confirm_delete_id = None; st.rerun() # Rerun to refresh saved list
-                # Error message handled within save_comparison
-    else: # Saved view or no comparison data yet
-        st.subheader(stats_title)
+        df_o_safe = df_ounass if df_ounass is not None and not df_ounass.empty else pd.DataFrame()
+        df_l_safe = df_levelshoes if df_levelshoes is not None and not df_levelshoes.empty else pd.DataFrame()
+        # df_c_safe represents the comparison dataframe, might be empty or lack columns initially
+        df_c_safe = df_comparison_sorted if df_comparison_sorted is not None and not df_comparison_sorted.empty else pd.DataFrame()
 
-    # Calculate stats (handle potential None DataFrames)
-    df_o_safe = df_ounass if df_ounass is not None else pd.DataFrame(columns=['Count'])
-    df_l_safe = df_levelshoes if df_levelshoes is not None else pd.DataFrame(columns=['Count'])
-    df_c_safe = df_comparison_sorted if df_comparison_sorted is not None else pd.DataFrame(columns=['Ounass_Count', 'LevelShoes_Count'])
+        # Initialize counts to 0
+        total_ounass_brands = 0
+        total_levelshoes_brands = 0
+        total_ounass_products = 0
+        total_levelshoes_products = 0
+        common_brands_count = 0
+        ounass_only_count = 0
+        levelshoes_only_count = 0
 
-    total_ounass_brands = len(df_o_safe) if not df_o_safe.empty else len(df_c_safe[df_c_safe['Ounass_Count'] > 0])
-    total_levelshoes_brands = len(df_l_safe) if not df_l_safe.empty else len(df_c_safe[df_c_safe['LevelShoes_Count'] > 0])
-    total_ounass_products = df_o_safe['Count'].sum() if not df_o_safe.empty else df_c_safe['Ounass_Count'].sum()
-    total_levelshoes_products = df_l_safe['Count'].sum() if not df_l_safe.empty else df_c_safe['LevelShoes_Count'].sum()
+        # Calculate from individual dataframes first if available
+        if not df_o_safe.empty:
+            total_ounass_brands = len(df_o_safe)
+            if 'Count' in df_o_safe.columns:
+                total_ounass_products = df_o_safe['Count'].sum()
 
-    common_brands_count, ounass_only_count, levelshoes_only_count = 0, 0, 0
-    if not df_c_safe.empty:
-        common_brands_count = len(df_c_safe[(df_c_safe['Ounass_Count'] > 0) & (df_c_safe['LevelShoes_Count'] > 0)])
-        ounass_only_count = len(df_c_safe[(df_c_safe['Ounass_Count'] > 0) & (df_c_safe['LevelShoes_Count'] == 0)])
-        levelshoes_only_count = len(df_c_safe[(df_c_safe['Ounass_Count'] == 0) & (df_c_safe['LevelShoes_Count'] > 0)])
+        if not df_l_safe.empty:
+            total_levelshoes_brands = len(df_l_safe)
+            if 'Count' in df_l_safe.columns:
+                total_levelshoes_products = df_l_safe['Count'].sum()
 
-    # Display Stats
-    stat_col1, stat_col2, stat_col3 = st.columns(3)
-    with stat_col1: st.metric("Ounass Brands", f"{total_ounass_brands:,}"); st.metric("Ounass Products", f"{total_ounass_products:,}")
-    with stat_col2: st.metric("Level Shoes Brands", f"{total_levelshoes_brands:,}"); st.metric("Level Shoes Products", f"{total_levelshoes_products:,}")
-    with stat_col3:
-        if common_brands_count or ounass_only_count or levelshoes_only_count:
-            st.metric("Common Brands", f"{common_brands_count:,}")
-            st.metric("Ounass Only", f"{ounass_only_count:,}")
-            st.metric("Level Shoes Only", f"{levelshoes_only_count:,}")
-        else:
-            st.caption("Comparison stats unavailable.") # Handle case where comparison failed but individual lists might exist
-    st.write(""); st.markdown("---")
+        # Calculate comparison stats only if comparison dataframe exists and has necessary columns
+        if not df_c_safe.empty and 'Ounass_Count' in df_c_safe.columns and 'LevelShoes_Count' in df_c_safe.columns:
+            # Recalculate totals from comparison df if individual ones were somehow missing
+            if total_ounass_products == 0:
+                 total_ounass_products = df_c_safe['Ounass_Count'].sum()
+            if total_levelshoes_products == 0:
+                 total_levelshoes_products = df_c_safe['LevelShoes_Count'].sum()
+            if total_ounass_brands == 0:
+                 total_ounass_brands = len(df_c_safe[df_c_safe['Ounass_Count'] > 0])
+            if total_levelshoes_brands == 0:
+                 total_levelshoes_brands = len(df_c_safe[df_c_safe['LevelShoes_Count'] > 0])
+
+            # Now calculate overlap stats safely
+            common_brands_count = len(df_c_safe[(df_c_safe['Ounass_Count'] > 0) & (df_c_safe['LevelShoes_Count'] > 0)])
+            ounass_only_count = len(df_c_safe[(df_c_safe['Ounass_Count'] > 0) & (df_c_safe['LevelShoes_Count'] == 0)])
+            levelshoes_only_count = len(df_c_safe[(df_c_safe['Ounass_Count'] == 0) & (df_c_safe['LevelShoes_Count'] > 0)])
+        # --- !!! GÜNCELLEME SONU !!! ---
+
+        # Display Stats (Bu kısım aynı kalabilir, çünkü hesaplanan değerleri kullanıyor)
+        stat_col1, stat_col2, stat_col3 = st.columns(3)
+        with stat_col1: st.metric("Ounass Brands", f"{total_ounass_brands:,}"); st.metric("Ounass Products", f"{total_ounass_products:,}")
+        with stat_col2: st.metric("Level Shoes Brands", f"{total_levelshoes_brands:,}"); st.metric("Level Shoes Products", f"{total_levelshoes_products:,}")
+        with stat_col3:
+            # Show comparison stats only if they were calculated (i.e., comparison was successful)
+            if not df_c_safe.empty and 'Ounass_Count' in df_c_safe.columns and 'LevelShoes_Count' in df_c_safe.columns:
+                st.metric("Common Brands", f"{common_brands_count:,}")
+                st.metric("Ounass Only", f"{ounass_only_count:,}")
+                st.metric("Level Shoes Only", f"{levelshoes_only_count:,}")
+            else:
+                 # Display placeholders or hide if no comparison data
+                 st.metric("Common Brands", "N/A")
+                 st.metric("Ounass Only", "N/A")
+                 st.metric("Level Shoes Only", "N/A")
+                 if not is_saved_view: # Only show caption in live view if comparison failed
+                     st.caption("Comparison stats require successful data from both sites.")
+
+        st.write(""); st.markdown("---")
+
+        # ... (Fonksiyonun geri kalan kısmı - Individual Results, Comparison Section vs. - aynı kalabilir) ...
+        # Bu bölümlerdeki DataFrame kontrolleri (örn: if not df_f.empty and 'Display_Brand' in df_f.columns:) zaten bu tür hataları engellemeli.
+Use code with caution.
+Python
+Yapılan Değişikliklerin Açıklaması:
+Güvenli Başlangıç: df_o_safe, df_l_safe, df_c_safe DataFrame'lerinin None veya boş olma durumları kontrol edilerek boş DataFrame'ler atanıyor.
+Varsayılan Değerler: Tüm istatistikler 0 olarak başlatılıyor.
+Önce Bireysel Hesaplama: Önce df_o_safe ve df_l_safe kullanılarak bireysel marka/ürün sayıları hesaplanıyor (eğer bu DataFrame'ler boş değilse).
+Karşılaştırma Kontrolü: Karşılaştırma istatistikleri (common_brands_count vs.) ve df_c_safe'den yedek hesaplamalar sadece df_c_safe boş değilse ve gerekli 'Ounass_Count' ve 'LevelShoes_Count' sütunlarını içeriyorsa yapılıyor.
+Görüntüleme Kontrolü: İstatistik metrikleri gösterilirken, karşılaştırma istatistiklerinin (Common, Ounass Only, LS Only) sadece df_c_safe geçerliyse gösterilmesi veya "N/A" olarak belirtilmesi sağlandı.
+Bu değişiklikleri uygulayıp kodu tekrar GitHub'a push ettikten ve Streamlit Cloud'un güncellenmesini bekledikten sonra uygulamanın başlangıçta hata vermemesi gerekir.
 
     # Individual Results Display (Only in Live View)
     if not is_saved_view:
