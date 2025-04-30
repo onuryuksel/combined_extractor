@@ -1,3 +1,5 @@
+# --- START OF UPDATED FILE combined_extractor_app (2).py ---
+
 import streamlit as st
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -11,17 +13,17 @@ import plotly.express as px
 import numpy as np
 import sqlite3
 from datetime import datetime
-import json
+import json # Added for the new Level Shoes processing
 from collections import defaultdict
 
 # --- App Configuration ---
-APP_VERSION = "2.4.7" # Added subcategory detection
+APP_VERSION = "2.4.8" # Updated version to reflect LevelShoes fix
 st.set_page_config(layout="wide", page_title="Ounass vs Level Shoes PLP Comparison")
 
 # --- App Title and Info ---
 st.title(f"Ounass vs Level Shoes PLP Designer Comparison (v{APP_VERSION})")
 st.write("Enter Product Listing Page (PLP) URLs from Ounass and Level Shoes (Women's Shoes/Bags recommended) to extract and compare designer brand counts, or compare previously saved snapshots.")
-st.info("Ensure the URLs point to the relevant listing pages. For Ounass, the tool will attempt to load all designers.")
+st.info("Ensure the URLs point to the relevant listing pages. For Ounass, the tool will attempt to load all designers. Level Shoes extraction uses the new __NEXT_DATA__ method.")
 
 # --- Session State Initialization ---
 if 'ounass_data' not in st.session_state: st.session_state.ounass_data = []
@@ -70,7 +72,7 @@ def load_specific_comparison(comp_id):
             if 'Difference' not in df.columns and 'Ounass_Count' in df.columns and 'LevelShoes_Count' in df.columns: df['Difference'] = df['Ounass_Count'] - df['LevelShoes_Count']
             if 'Display_Brand' not in df.columns:
                 brand_ounass_col = 'Brand_Ounass' if 'Brand_Ounass' in df.columns else None; brand_ls_col = 'Brand_LevelShoes' if 'Brand_LevelShoes' in df.columns else None; brand_cleaned_col = 'Brand_Cleaned' if 'Brand_Cleaned' in df.columns else None;
-                df['Display_Brand'] = np.where(df['Ounass_Count'] > 0, df[brand_ounass_col] if brand_ounass_col else df[brand_cleaned_col] if brand_cleaned_col else "Unknown", df[brand_ls_col] if brand_ls_col else df[brand_cleaned_col] if brand_cleaned_col else "Unknown")
+                df['Display_Brand'] = np.where(df['Ounass_Count'] > 0, df[brand_ounass_col] if brand_ounass_col else df[brand_cleaned_col] if brand_cleaned_col else "Unknown", df[ls_col] if brand_ls_col else df[brand_cleaned_col] if brand_cleaned_col else "Unknown")
                 if brand_cleaned_col: df['Display_Brand'].fillna(df[brand_cleaned_col].fillna("Unknown"), inplace=True)
                 else: df['Display_Brand'].fillna("Unknown", inplace=True)
             return meta, df
@@ -91,7 +93,7 @@ def custom_scorer(s1, s2):
     scores = [fuzz.ratio(s1, s2), fuzz.partial_ratio(s1, s2), fuzz.token_set_ratio(s1, s2), fuzz.token_sort_ratio(s1, s2)]; return max(scores)
 
 # --- HTML Processing Functions ---
-# (process_ounass_html and process_levelshoes_html remain unchanged)
+# Ounass function remains the same
 def process_ounass_html(html_content):
     soup = BeautifulSoup(html_content, 'html.parser'); data = []
     try:
@@ -113,45 +115,124 @@ def process_ounass_html(html_content):
     except Exception as e: st.error(f"Ounass: Parsing error: {e}"); return []
     if not data and html_content: st.warning("Ounass: No brand data extracted.");
     return data
+
+# !!! UPDATED Level Shoes HTML Processing Function using __NEXT_DATA__ !!!
 def process_levelshoes_html(html_content):
-    soup = BeautifulSoup(html_content, 'html.parser'); data = []
+    """
+    Parses HTML content from Level Shoes PLP to extract designer brands
+    and counts by finding and processing the __NEXT_DATA__ JSON blob.
+
+    Args:
+        html_content (str): The full HTML content of the Level Shoes PLP.
+
+    Returns:
+        list: A list of dictionaries [{'Brand': name, 'Count': count}, ...] on success.
+              Returns an empty list [] if data cannot be extracted, logging warnings/errors.
+    """
+    data_extracted = [] # Use the format expected by the main app
+    if not html_content:
+        st.warning("Level Shoes: Received empty HTML content.")
+        return data_extracted
+
     try:
-        h4 = soup.find('h4', text='Designer', attrs={'data-cy': 'CategoryFacets-label'}) or soup.find(lambda t: t.name=='h4' and 'Designer' in t.get_text(strip=True))
-        container = None
-        if h4:
-            curr = h4.parent; lvl=0
-            while curr and curr.name != 'body' and lvl < 10:
-                lvl += 1
-                if curr.name == 'div' and 'accordion-root' in curr.get('class', []):
-                    ul = curr.find('ul');
-                    if ul and ul.find('label'): container = curr; break
-                curr = curr.parent
-        if container:
-            ul = container.find('ul'); items = []
-            if ul:
-                items = [li for li in ul.find_all('li', recursive=False, limit=300) if li.find('label') and li.find('p')]
-                if not items: items = [li for li in ul.find_all('li', limit=300) if li.find('label') and li.find('p')]
-            if not items: st.warning("Level Shoes: No brand list items found in container.")
-            else:
-                for item in items:
-                    try:
-                        lbl = item.find('label')
-                        if lbl:
-                            p = lbl.find_all('p', limit=2)
-                            if len(p) == 2:
-                                d_name = p[0].text.strip(); c_text = p[1].text.strip(); match = re.search(r'\((\d+)\)', c_text); count = int(match.group(1)) if match else 0
-                                if d_name and "VIEW ALL" not in d_name.upper() and "SHOW M" not in d_name.upper() and "SHOW L" not in d_name.upper(): data.append({'Brand': d_name, 'Count': count})
-                    except Exception: pass
-        else: st.warning("Level Shoes: Could not find the designer filter container.")
-    except Exception as e: st.error(f"Level Shoes: Parsing error: {e}"); return []
-    if not data and html_content: st.warning("Level Shoes: No brand data extracted.");
-    return data
+        soup = BeautifulSoup(html_content, 'html.parser')
+        script_tag = soup.find('script', {'id': '__NEXT_DATA__'})
+
+        if not script_tag:
+            st.error("Level Shoes Error: Page structure changed, '__NEXT_DATA__' script tag not found.")
+            # Optional: Add old fallback logic here if needed, but it's likely broken.
+            # For now, rely solely on __NEXT_DATA__
+            return data_extracted # Return empty list if __NEXT_DATA__ fails
+
+        json_data_str = script_tag.string
+        if not json_data_str:
+            st.error("Level Shoes Error: __NEXT_DATA__ script tag content is empty.")
+            return data_extracted
+
+        # Parse the JSON data
+        data = json.loads(json_data_str)
+
+        # Navigate the JSON structure safely
+        apollo_state = data.get('props', {}).get('pageProps', {}).get('__APOLLO_STATE__', {})
+        if not apollo_state:
+             st.error("Level Shoes Error: '__APOLLO_STATE__' not found within __NEXT_DATA__.")
+             return data_extracted
+
+        root_query = apollo_state.get('ROOT_QUERY', {})
+        if not root_query:
+            st.error("Level Shoes Error: 'ROOT_QUERY' not found within __APOLLO_STATE__.")
+            return data_extracted
+
+        # Find the key for product list data (often contains '_productList')
+        product_list_key = next((key for key in root_query if key.startswith('_productList')), None)
+        if not product_list_key:
+             # Try alternative key structure often seen: _productList:({...})
+             product_list_key = next((key for key in root_query if '_productList:({' in key), None)
+             if not product_list_key:
+                 st.error("Level Shoes Error: Could not find product list data key in ROOT_QUERY.")
+                 # For debugging: # st.json(root_query.keys())
+                 return data_extracted
+
+        product_list_data = root_query.get(product_list_key, {})
+        facets = product_list_data.get('facets', [])
+        if not facets:
+            st.warning("Level Shoes Warning: No 'facets' (filters) found in product list data.")
+            return data_extracted # No filters available
+
+        # Find the 'brand' or 'designer' facet
+        designer_facet = None
+        for facet in facets:
+            # Check both 'key' and 'label' for flexibility
+            facet_key = facet.get('key', '').lower()
+            facet_label = facet.get('label', '').lower()
+            if facet_key == 'brand' or facet_label == 'designer':
+                designer_facet = facet
+                break
+
+        if not designer_facet:
+            available_facets = [f.get('key') or f.get('label') for f in facets]
+            st.error(f"Level Shoes Error: 'brand' or 'Designer' facet not found. Available facets: {available_facets}")
+            return data_extracted
+
+        # Extract options from the designer facet
+        designer_options = designer_facet.get('options', [])
+        if not designer_options:
+            st.warning("Level Shoes Warning: 'Designer' facet found, but it contains no options.")
+            return data_extracted
+
+        # Process the options into the desired format
+        for option in designer_options:
+            name = option.get('name')
+            count = option.get('count')
+            # Ensure we have valid data and skip generic/control options
+            if name is not None and count is not None:
+                 # Add checks for common filter control text like "VIEW ALL", "SHOW MORE", etc.
+                 upper_name = name.upper()
+                 if "VIEW ALL" not in upper_name and "SHOW M" not in upper_name and "SHOW L" not in upper_name:
+                     data_extracted.append({'Brand': name.strip(), 'Count': int(count)})
+
+        if not data_extracted:
+             st.warning("Level Shoes: Designer options were processed, but no valid brand data was extracted (list is empty).")
+
+        return data_extracted
+
+    except json.JSONDecodeError:
+        st.error("Level Shoes Error: Failed to decode JSON data from __NEXT_DATA__.")
+        return []
+    except (AttributeError, KeyError, TypeError, IndexError) as e:
+        st.error(f"Level Shoes Error: Problem navigating the JSON structure - {e}. Site structure might have changed again.")
+        return []
+    except Exception as e:
+        st.error(f"Level Shoes Error: An unexpected error occurred during processing - {e}")
+        # For debugging: # st.exception(e)
+        return []
 
 # --- Function to fetch HTML content from URL ---
 def fetch_html_content(url):
     if not url: st.error("Fetch error: URL cannot be empty."); return None
     try:
-        h = {'User-Agent':'Mozilla/5.0','Accept':'text/html','Accept-Language':'en-US,en;q=0.9','Connection':'keep-alive'}
+        # Using a more common User-Agent
+        h = {'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36','Accept':'text/html','Accept-Language':'en-US,en;q=0.9','Connection':'keep-alive'}
         r = requests.get(url, headers=h, timeout=30); r.raise_for_status(); return r.text
     except requests.exceptions.Timeout: st.error(f"Error: Timeout fetching {url}"); return None
     except requests.exceptions.RequestException as e: st.error(f"Error fetching {url}: {e}"); return None
@@ -171,7 +252,7 @@ def ensure_ounass_full_list_parameter(url):
         else: return url
     except Exception as e: st.warning(f"Error processing Ounass URL: {e}"); return url
 
-# --- !!! UPDATED URL Info Extraction Function !!! ---
+# --- URL Info Extraction Function ---
 def extract_info_from_url(url):
     """Attempts to extract gender and category/subcategory from Ounass/LevelShoes URL paths."""
     try:
@@ -215,7 +296,6 @@ def extract_info_from_url(url):
         # Optional: Log error to sidebar or console for debugging
         # st.sidebar.caption(f"URL Info Extraction Error: {e}")
         return None, None
-# !!! END URL Info Extraction Function !!!
 
 # Initialize Database
 init_db()
@@ -260,13 +340,14 @@ else:
                         meta1, df1 = load_specific_comparison(st.session_state.time_comp_id1); meta2, df2 = load_specific_comparison(st.session_state.time_comp_id2)
                         if meta1 and df1 is not None and meta2 and df2 is not None:
                             ts1 = datetime.fromisoformat(meta1['timestamp']); ts2 = datetime.fromisoformat(meta2['timestamp'])
-                            if ts1 > ts2: meta1, df1, meta2, df2 = meta2, df2, meta1, df1
-                            if 'Display_Brand' not in df1.columns: df1['Display_Brand'] = df1['Brand_Ounass'].fillna(df1['Brand_LevelShoes']).fillna(df1['Brand_Cleaned']).fillna("Unknown");
-                            if 'Display_Brand' not in df2.columns: df2['Display_Brand'] = df2['Brand_Ounass'].fillna(df2['Brand_LevelShoes']).fillna(df2['Brand_Cleaned']).fillna("Unknown");
+                            if ts1 > ts2: meta1, df1, meta2, df2 = meta2, df2, meta1, df1 # Ensure T1 is older
+                            # Ensure Display_Brand exists before merge
+                            if 'Display_Brand' not in df1.columns: df1['Display_Brand'] = df1['Brand_Ounass'].fillna(df1['Brand_LevelShoes']).fillna(df1['Brand_Cleaned']).fillna("Unknown")
+                            if 'Display_Brand' not in df2.columns: df2['Display_Brand'] = df2['Brand_Ounass'].fillna(df2['Brand_LevelShoes']).fillna(df2['Brand_Cleaned']).fillna("Unknown")
                             df_time = pd.merge(df1[['Display_Brand','Ounass_Count','LevelShoes_Count']], df2[['Display_Brand','Ounass_Count','LevelShoes_Count']], on='Display_Brand', how='outer', suffixes=('_T1','_T2')); df_time.fillna(0, inplace=True);
                             df_time['Ounass_Change'] = (df_time['Ounass_Count_T2']-df_time['Ounass_Count_T1']).astype(int); df_time['LevelShoes_Change'] = (df_time['LevelShoes_Count_T2']-df_time['LevelShoes_Count_T1']).astype(int)
                             st.session_state.df_time_comparison = df_time; st.session_state.time_comp_meta1 = meta1; st.session_state.time_comp_meta2 = meta2; st.query_params.clear(); st.rerun()
-                        else: st.error("Failed to load data."); st.session_state.df_time_comparison = pd.DataFrame()
+                        else: st.error("Failed to load data for one or both snapshots."); st.session_state.df_time_comparison = pd.DataFrame()
                     else: st.warning("Please select two different snapshots."); st.session_state.df_time_comparison = pd.DataFrame()
             st.markdown("---"); st.caption("View/Delete individual snapshots:")
             for comp_meta in comps_list:
@@ -289,16 +370,15 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
     if is_saved_view and saved_meta:
          oun_g, oun_c = extract_info_from_url(saved_meta.get('ounass_url', '')); ls_g, ls_c = extract_info_from_url(saved_meta.get('levelshoes_url', ''))
          if oun_g or ls_g: detected_gender = oun_g or ls_g
-         if oun_c or ls_c: detected_category = oun_c or ls_c
+         if oun_c or ls_c: detected_category = oun_c or ls_c # Prefer Ounass if both available, but take either
          st.subheader(f"Viewing Saved Comparison ({saved_meta['timestamp']})")
          st.caption(f"Ounass URL: `{saved_meta['ounass_url']}`")
          st.caption(f"Level Shoes URL: `{saved_meta['levelshoes_url']}`")
          st.markdown("---")
-    else:
+    else: # Live view
         url_for_stats = st.session_state.get('processed_ounass_url') or st.session_state.get('ounass_url_input')
-        if not url_for_stats: url_for_stats = st.session_state.get('levelshoes_url_input')
+        if not url_for_stats: url_for_stats = st.session_state.get('levelshoes_url_input') # Fallback to LS URL if Ounass not entered
         if url_for_stats:
-            # !!! DÜZELTİLMİŞ Atama !!!
             g_live, c_live = extract_info_from_url(url_for_stats)
             if g_live is not None: detected_gender = g_live
             if c_live is not None: detected_category = c_live
@@ -307,39 +387,49 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
     elif detected_gender: stats_title = f"{stats_title_prefix} - {detected_gender}"
     elif detected_category: stats_title = f"{stats_title_prefix} - {detected_category}"
 
-    # Save Button Area
+    # Save Button Area (only in live view with results)
     if not is_saved_view and not df_comparison_sorted.empty:
         stat_title_col, stat_save_col = st.columns([0.8, 0.2])
         with stat_title_col: st.subheader(stats_title)
         with stat_save_col:
-            st.write("")
-            # !!! REMOVED Name Input Popover, Save directly !!!
+            st.write("") # Spacer
             if st.button("💾 Save", key="save_live_comp_confirm", help="Save current comparison results", use_container_width=True):
-                oun_url = st.session_state.get('processed_ounass_url', ''); ls_url = st.session_state.get('levelshoes_url_input', ''); df_save = st.session_state.df_comparison_sorted
-                # Save without asking for name
+                oun_url = st.session_state.get('processed_ounass_url', st.session_state.get('ounass_url_input','')); # Ensure we save the processed Ounass URL if available
+                ls_url = st.session_state.get('levelshoes_url_input', ''); df_save = st.session_state.df_comparison_sorted
                 if save_comparison(oun_url, ls_url, df_save):
                     st.success(f"Comparison saved! (Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
-                    st.session_state.confirm_delete_id = None; st.rerun()
-    else: st.subheader(stats_title)
+                    st.session_state.confirm_delete_id = None; st.rerun() # Rerun to refresh saved list
+                # Error message handled within save_comparison
+    else: # Saved view or no comparison data yet
+        st.subheader(stats_title)
 
-    # Calculate stats
-    total_ounass_brands = len(df_ounass) if df_ounass is not None and not df_ounass.empty else len(df_comparison_sorted[df_comparison_sorted['Ounass_Count'] > 0]) if not df_comparison_sorted.empty else 0
-    total_levelshoes_brands = len(df_levelshoes) if df_levelshoes is not None and not df_levelshoes.empty else len(df_comparison_sorted[df_comparison_sorted['LevelShoes_Count'] > 0]) if not df_comparison_sorted.empty else 0
-    total_ounass_products = df_ounass['Count'].sum() if df_ounass is not None and not df_ounass.empty else df_comparison_sorted['Ounass_Count'].sum() if not df_comparison_sorted.empty else 0
-    total_levelshoes_products = df_levelshoes['Count'].sum() if df_levelshoes is not None and not df_levelshoes.empty else df_comparison_sorted['LevelShoes_Count'].sum() if not df_comparison_sorted.empty else 0
+    # Calculate stats (handle potential None DataFrames)
+    df_o_safe = df_ounass if df_ounass is not None else pd.DataFrame(columns=['Count'])
+    df_l_safe = df_levelshoes if df_levelshoes is not None else pd.DataFrame(columns=['Count'])
+    df_c_safe = df_comparison_sorted if df_comparison_sorted is not None else pd.DataFrame(columns=['Ounass_Count', 'LevelShoes_Count'])
+
+    total_ounass_brands = len(df_o_safe) if not df_o_safe.empty else len(df_c_safe[df_c_safe['Ounass_Count'] > 0])
+    total_levelshoes_brands = len(df_l_safe) if not df_l_safe.empty else len(df_c_safe[df_c_safe['LevelShoes_Count'] > 0])
+    total_ounass_products = df_o_safe['Count'].sum() if not df_o_safe.empty else df_c_safe['Ounass_Count'].sum()
+    total_levelshoes_products = df_l_safe['Count'].sum() if not df_l_safe.empty else df_c_safe['LevelShoes_Count'].sum()
+
     common_brands_count, ounass_only_count, levelshoes_only_count = 0, 0, 0
-    if not df_comparison_sorted.empty:
-        common_brands_count = len(df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] > 0) & (df_comparison_sorted['LevelShoes_Count'] > 0)])
-        ounass_only_count = len(df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] > 0) & (df_comparison_sorted['LevelShoes_Count'] == 0)])
-        levelshoes_only_count = len(df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] == 0) & (df_comparison_sorted['LevelShoes_Count'] > 0)])
+    if not df_c_safe.empty:
+        common_brands_count = len(df_c_safe[(df_c_safe['Ounass_Count'] > 0) & (df_c_safe['LevelShoes_Count'] > 0)])
+        ounass_only_count = len(df_c_safe[(df_c_safe['Ounass_Count'] > 0) & (df_c_safe['LevelShoes_Count'] == 0)])
+        levelshoes_only_count = len(df_c_safe[(df_c_safe['Ounass_Count'] == 0) & (df_c_safe['LevelShoes_Count'] > 0)])
 
     # Display Stats
     stat_col1, stat_col2, stat_col3 = st.columns(3)
     with stat_col1: st.metric("Ounass Brands", f"{total_ounass_brands:,}"); st.metric("Ounass Products", f"{total_ounass_products:,}")
     with stat_col2: st.metric("Level Shoes Brands", f"{total_levelshoes_brands:,}"); st.metric("Level Shoes Products", f"{total_levelshoes_products:,}")
     with stat_col3:
-        if common_brands_count or ounass_only_count or levelshoes_only_count: st.metric("Common Brands", f"{common_brands_count:,}"); st.metric("Ounass Only", f"{ounass_only_count:,}"); st.metric("Level Shoes Only", f"{levelshoes_only_count:,}")
-        else: st.caption("Comparison stats unavailable.")
+        if common_brands_count or ounass_only_count or levelshoes_only_count:
+            st.metric("Common Brands", f"{common_brands_count:,}")
+            st.metric("Ounass Only", f"{ounass_only_count:,}")
+            st.metric("Level Shoes Only", f"{levelshoes_only_count:,}")
+        else:
+            st.caption("Comparison stats unavailable.") # Handle case where comparison failed but individual lists might exist
     st.write(""); st.markdown("---")
 
     # Individual Results Display (Only in Live View)
@@ -347,21 +437,32 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Ounass Results");
-            if df_ounass is not None and not df_ounass.empty: st.write(f"Brands: {len(df_ounass)}"); df_display = df_ounass.sort_values(by='Count', ascending=False).reset_index(drop=True); df_display.index += 1; st.dataframe(df_display[['Brand', 'Count']], height=400); csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button("Download Ounass List (CSV)", csv_buffer.getvalue(), 'ounass_brands.csv', 'text/csv', key='ounass_dl_disp')
-            elif process_button and st.session_state.ounass_url_input: st.warning("No data from Ounass.")
-            elif not process_button: st.info("Enter Ounass URL.")
+            if df_ounass is not None and not df_ounass.empty:
+                 st.write(f"Brands: {len(df_ounass)}"); df_display = df_ounass.sort_values(by='Count', ascending=False).reset_index(drop=True); df_display.index += 1; st.dataframe(df_display[['Brand', 'Count']], height=400, use_container_width=True);
+                 csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button("Download Ounass List (CSV)", csv_buffer.getvalue(), 'ounass_brands.csv', 'text/csv', key='ounass_dl_disp')
+            elif process_button and st.session_state.ounass_url_input: st.warning("No data extracted from Ounass.")
+            elif not process_button and st.session_state.ounass_url_input: st.info("Click 'Process URLs' to fetch Ounass data.")
+            else: st.info("Enter Ounass URL.")
         with col2:
             st.subheader("Level Shoes Results");
-            if df_levelshoes is not None and not df_levelshoes.empty: st.write(f"Brands: {len(df_levelshoes)}"); df_display = df_levelshoes.sort_values(by='Count', ascending=False).reset_index(drop=True); df_display.index += 1; st.dataframe(df_display[['Brand', 'Count']], height=400); csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button("Download Level Shoes List (CSV)", csv_buffer.getvalue(), 'levelshoes_brands.csv', 'text/csv', key='ls_dl_disp')
-            elif process_button and st.session_state.levelshoes_url_input: st.warning("No data from Level Shoes.")
-            elif not process_button: st.info("Enter Level Shoes URL.")
+            if df_levelshoes is not None and not df_levelshoes.empty:
+                 st.write(f"Brands: {len(df_levelshoes)}"); df_display = df_levelshoes.sort_values(by='Count', ascending=False).reset_index(drop=True); df_display.index += 1; st.dataframe(df_display[['Brand', 'Count']], height=400, use_container_width=True);
+                 csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button("Download Level Shoes List (CSV)", csv_buffer.getvalue(), 'levelshoes_brands.csv', 'text/csv', key='ls_dl_disp')
+            elif process_button and st.session_state.levelshoes_url_input: st.warning("No data extracted from Level Shoes.")
+            elif not process_button and st.session_state.levelshoes_url_input: st.info("Click 'Process URLs' to fetch Level Shoes data.")
+            else: st.info("Enter Level Shoes URL.")
 
     # Comparison Section
-    if not df_comparison_sorted.empty:
-        if not is_saved_view: st.markdown("---")
+    if df_comparison_sorted is not None and not df_comparison_sorted.empty:
+        if not is_saved_view: st.markdown("---") # Separator only needed in live view
         st.subheader("Ounass vs Level Shoes Brand Comparison")
         df_display = df_comparison_sorted.copy(); df_display.index += 1
-        st.dataframe(df_display[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']], height=500)
+        # Ensure necessary columns exist for display
+        display_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']
+        missing_cols = [col for col in display_cols if col not in df_display.columns]
+        if missing_cols: st.warning(f"Comparison table missing columns: {missing_cols}")
+        else: st.dataframe(df_display[display_cols], height=500, use_container_width=True)
+
         st.markdown("---"); st.subheader("Visual Comparison")
         viz_col1, viz_col2 = st.columns(2)
         with viz_col1:
@@ -370,132 +471,251 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
             else: st.info("No data for overlap chart.")
         with viz_col2:
             st.write("**Top 10 Largest Differences**"); top_pos = df_comparison_sorted[df_comparison_sorted['Difference'] > 0].nlargest(5, 'Difference'); top_neg = df_comparison_sorted[df_comparison_sorted['Difference'] < 0].nsmallest(5, 'Difference'); top_diff = pd.concat([top_pos, top_neg]).sort_values('Difference', ascending=False)
-            if not top_diff.empty: fig_diff = px.bar(top_diff, x='Display_Brand', y='Difference', title="Largest Differences (Ounass - Level Shoes)", labels={'Display_Brand': 'Brand'}, color='Difference', color_continuous_scale=px.colors.diverging.RdBu); fig_diff.update_layout(xaxis_title=None); st.plotly_chart(fig_diff, use_container_width=True)
+            if not top_diff.empty and 'Display_Brand' in top_diff.columns: fig_diff = px.bar(top_diff, x='Display_Brand', y='Difference', title="Largest Differences (Ounass - Level Shoes)", labels={'Display_Brand': 'Brand'}, color='Difference', color_continuous_scale=px.colors.diverging.RdBu); fig_diff.update_layout(xaxis_title=None); st.plotly_chart(fig_diff, use_container_width=True)
             else: st.info("No data for difference chart.")
+
         st.markdown("---"); st.subheader("Top 15 Brands Comparison (Total Products)")
-        if not df_comparison_sorted.empty:
+        if not df_comparison_sorted.empty and 'Display_Brand' in df_comparison_sorted.columns:
             df_comp_copy = df_comparison_sorted.copy(); df_comp_copy['Total_Count'] = df_comp_copy['Ounass_Count'] + df_comp_copy['LevelShoes_Count']; top_n = 15; top_brands = df_comp_copy.nlargest(top_n, 'Total_Count');
             if not top_brands.empty:
                 melted = top_brands.melt(id_vars='Display_Brand', value_vars=['Ounass_Count', 'LevelShoes_Count'], var_name='Website', value_name='Product Count'); melted['Website'] = melted['Website'].str.replace('_Count', '').str.replace('LevelShoes','Level Shoes');
-                fig_top = px.bar(melted, x='Display_Brand', y='Product Count', color='Website', barmode='group', title=f"Top {top_n} Brands", labels={'Display_Brand': 'Brand'}, category_orders={"Display_Brand": top_brands['Display_Brand'].tolist()}); fig_top.update_layout(xaxis_title=None); st.plotly_chart(fig_top, use_container_width=True)
+                fig_top = px.bar(melted, x='Display_Brand', y='Product Count', color='Website', barmode='group', title=f"Top {top_n} Brands by Total Products", labels={'Display_Brand': 'Brand'}, category_orders={"Display_Brand": top_brands['Display_Brand'].tolist()}); fig_top.update_layout(xaxis_title=None); st.plotly_chart(fig_top, use_container_width=True)
             else: st.info(f"Not enough data for Top {top_n} chart.")
         else: st.info(f"Not enough data for Top {top_n} chart.")
+
         st.markdown("---"); col_comp1, col_comp2 = st.columns(2)
         with col_comp1:
             st.subheader("Brands in Ounass Only"); df_f = df_comparison_sorted[lambda x: (x['LevelShoes_Count'] == 0) & (x['Ounass_Count'] > 0)]
-            if not df_f.empty: df_d = df_f.reset_index(drop=True); df_d.index += 1; st.dataframe(df_d[['Display_Brand', 'Ounass_Count']], height=400)
+            if not df_f.empty and 'Display_Brand' in df_f.columns: df_d = df_f.reset_index(drop=True); df_d.index += 1; st.dataframe(df_d[['Display_Brand', 'Ounass_Count']], height=400, use_container_width=True)
             else: st.info("No unique Ounass brands found.")
         with col_comp2:
             st.subheader("Brands in Level Shoes Only"); df_f = df_comparison_sorted[lambda x: (x['Ounass_Count'] == 0) & (x['LevelShoes_Count'] > 0)]
-            if not df_f.empty: df_d = df_f.reset_index(drop=True); df_d.index += 1; st.dataframe(df_d[['Display_Brand', 'LevelShoes_Count']], height=400)
+            if not df_f.empty and 'Display_Brand' in df_f.columns: df_d = df_f.reset_index(drop=True); df_d.index += 1; st.dataframe(df_d[['Display_Brand', 'LevelShoes_Count']], height=400, use_container_width=True)
             else: st.info("No unique Level Shoes brands found.")
+
         st.markdown("---"); col_comp3, col_comp4 = st.columns(2)
         with col_comp3:
             st.subheader("Common Brands: Ounass > Level Shoes"); df_f = df_comparison_sorted[lambda x: (x['Ounass_Count'] > 0) & (x['LevelShoes_Count'] > 0) & (x['Difference'] > 0)].sort_values('Difference', ascending=False)
-            if not df_f.empty: df_d = df_f.reset_index(drop=True); df_d.index += 1; st.dataframe(df_d[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']], height=400)
+            if not df_f.empty and 'Display_Brand' in df_f.columns: df_d = df_f.reset_index(drop=True); df_d.index += 1; st.dataframe(df_d[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']], height=400, use_container_width=True)
             else: st.info("No common brands where Ounass > Level Shoes.")
         with col_comp4:
             st.subheader("Common Brands: Level Shoes > Ounass"); df_f = df_comparison_sorted[lambda x: (x['Ounass_Count'] > 0) & (x['LevelShoes_Count'] > 0) & (x['Difference'] < 0)].sort_values('Difference', ascending=True)
-            if not df_f.empty: df_d = df_f.reset_index(drop=True); df_d.index += 1; st.dataframe(df_d[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']], height=400)
+            if not df_f.empty and 'Display_Brand' in df_f.columns: df_d = df_f.reset_index(drop=True); df_d.index += 1; st.dataframe(df_d[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']], height=400, use_container_width=True)
             else: st.info("No common brands where Level Shoes > Ounass.")
-        st.markdown("---")
-        csv_buffer_comparison = io.StringIO(); df_comparison_sorted[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']].to_csv(csv_buffer_comparison, index=False, encoding='utf-8'); csv_buffer_comparison.seek(0)
-        download_label = f"Download {'Saved' if is_saved_view else 'Current'} Comparison (CSV)"; download_key = f"comp_dl_button_{'saved' if is_saved_view else 'live'}_{view_id or 'current'}"; saved_name_part = saved_meta.get('name','').replace(' ','_').replace('/','-') if is_saved_view and saved_meta else 'live'; download_filename = f"brand_comparison_{saved_name_part}.csv"
-        st.download_button(download_label, csv_buffer_comparison.getvalue(), download_filename, 'text/csv', key=download_key)
 
-    elif process_button and not is_saved_view:
+        st.markdown("---") # Separator before download button
+        csv_buffer_comparison = io.StringIO();
+        dl_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']
+        if all(col in df_comparison_sorted.columns for col in dl_cols):
+            df_comparison_sorted[dl_cols].to_csv(csv_buffer_comparison, index=False, encoding='utf-8'); csv_buffer_comparison.seek(0)
+            download_label = f"Download {'Saved' if is_saved_view else 'Current'} Comparison (CSV)";
+            view_id = viewing_saved_id or 'current' # Use viewing_saved_id if available
+            download_key = f"comp_dl_button_{'saved' if is_saved_view else 'live'}_{view_id}";
+            saved_name_part = saved_meta.get('name','').replace(' ','_').replace('/','-') if is_saved_view and saved_meta else 'live';
+            # Attempt to create a more descriptive filename using category/gender
+            filename_desc = saved_meta.get('name') if is_saved_view and saved_meta else f"{detected_gender or 'All'}_{detected_category or 'All'}".replace(' > ','-').replace(' ','_')
+            download_filename = f"brand_comparison_{filename_desc}_{view_id}.csv".replace('?_?', 'live') # Clean up filename
+            st.download_button(download_label, csv_buffer_comparison.getvalue(), download_filename, 'text/csv', key=download_key)
+        else:
+             st.warning("Could not generate download file due to missing comparison columns.")
+
+    elif process_button and not is_saved_view: # Process clicked, but no comparison generated
         st.markdown("---"); st.warning("Comparison could not be generated. Check if data was successfully extracted from both URLs.")
     elif not process_button and not is_saved_view and st.session_state.get('df_ounass', pd.DataFrame()).empty and st.session_state.get('df_levelshoes', pd.DataFrame()).empty :
+         # Initial state or after clearing, show info message
          st.info("Enter URLs in the sidebar and click 'Process URLs' or select a saved comparison.")
 
 # --- Time Comparison Display Function ---
 def display_time_comparison_results(df_time_comp, meta1, meta2):
     st.markdown("---"); st.subheader("Snapshot Comparison Over Time")
-    ts_format = '%Y-%m-%d %H:%M'; ts1_str = datetime.fromisoformat(meta1['timestamp']).strftime(ts_format); ts2_str = datetime.fromisoformat(meta2['timestamp']).strftime(ts_format)
-    st.markdown(f"Comparing **Snapshot 1** (`{ts1_str}`) **vs** **Snapshot 2** (`{ts2_str}`)")
-    with st.expander("Show URLs for Compared Snapshots"): st.caption(f"**Snap 1:** O: `{meta1['ounass_url']}` | LS: `{meta1['levelshoes_url']}`"); st.caption(f"**Snap 2:** O: `{meta2['ounass_url']}` | LS: `{meta2['levelshoes_url']}`")
+    try:
+        ts_format = '%Y-%m-%d %H:%M'; ts1_str = datetime.fromisoformat(meta1.get('timestamp','')).strftime(ts_format); ts2_str = datetime.fromisoformat(meta2.get('timestamp','')).strftime(ts_format)
+        st.markdown(f"Comparing **Snapshot 1** (`{ts1_str}`, ID: {meta1.get('id','N/A')}) **vs** **Snapshot 2** (`{ts2_str}`, ID: {meta2.get('id','N/A')})")
+    except: # Handle cases where meta might be incomplete
+        st.markdown("Comparing Snapshot 1 vs Snapshot 2 (Error fetching timestamps)")
+
+    with st.expander("Show URLs for Compared Snapshots"):
+        st.caption(f"**Snap 1 ({ts1_str}):** O: `{meta1.get('ounass_url', 'N/A')}` | LS: `{meta1.get('levelshoes_url', 'N/A')}`")
+        st.caption(f"**Snap 2 ({ts2_str}):** O: `{meta2.get('ounass_url', 'N/A')}` | LS: `{meta2.get('levelshoes_url', 'N/A')}`")
     st.markdown("---")
-    new_o=df_time_comp[(df_time_comp['Ounass_Count_T1']==0)&(df_time_comp['Ounass_Count_T2']>0)]; drop_o=df_time_comp[(df_time_comp['Ounass_Count_T1']>0)&(df_time_comp['Ounass_Count_T2']==0)]; inc_o=df_time_comp[df_time_comp['Ounass_Change']>0]; dec_o=df_time_comp[df_time_comp['Ounass_Change']<0]
-    new_l=df_time_comp[(df_time_comp['LevelShoes_Count_T1']==0)&(df_time_comp['LevelShoes_Count_T2']>0)]; drop_l=df_time_comp[(df_time_comp['LevelShoes_Count_T1']>0)&(df_time_comp['LevelShoes_Count_T2']==0)]; inc_l=df_time_comp[df_time_comp['LevelShoes_Change']>0]; dec_l=df_time_comp[df_time_comp['LevelShoes_Change']<0]
+
+    # Calculate changes safely
+    new_o=df_time_comp[(df_time_comp['Ounass_Count_T1']==0)&(df_time_comp['Ounass_Count_T2']>0)]
+    drop_o=df_time_comp[(df_time_comp['Ounass_Count_T1']>0)&(df_time_comp['Ounass_Count_T2']==0)]
+    inc_o=df_time_comp[(df_time_comp['Ounass_Change']>0) & (df_time_comp['Ounass_Count_T1'] > 0)] # Exclude 'New'
+    dec_o=df_time_comp[(df_time_comp['Ounass_Change']<0) & (df_time_comp['Ounass_Count_T2'] > 0)] # Exclude 'Dropped'
+
+    new_l=df_time_comp[(df_time_comp['LevelShoes_Count_T1']==0)&(df_time_comp['LevelShoes_Count_T2']>0)]
+    drop_l=df_time_comp[(df_time_comp['LevelShoes_Count_T1']>0)&(df_time_comp['LevelShoes_Count_T2']==0)]
+    inc_l=df_time_comp[(df_time_comp['LevelShoes_Change']>0) & (df_time_comp['LevelShoes_Count_T1'] > 0)] # Exclude 'New'
+    dec_l=df_time_comp[(df_time_comp['LevelShoes_Change']<0) & (df_time_comp['LevelShoes_Count_T2'] > 0)] # Exclude 'Dropped'
+
     st.subheader("Summary of Changes"); t_stat_col1, t_stat_col2 = st.columns(2)
-    with t_stat_col1: st.metric("New Brands (Ounass)",len(new_o)); st.metric("Dropped Brands (Ounass)",len(drop_o)); st.metric("Net Product Change (Ounass)",f"{df_time_comp['Ounass_Change'].sum():+,}")
-    with t_stat_col2: st.metric("New Brands (Level Shoes)",len(new_l)); st.metric("Dropped Brands (Level Shoes)",len(drop_l)); st.metric("Net Product Change (Level Shoes)",f"{df_time_comp['LevelShoes_Change'].sum():+,}")
+    with t_stat_col1:
+        st.metric("New Brands (Ounass)",len(new_o))
+        st.metric("Dropped Brands (Ounass)",len(drop_o))
+        st.metric("Increased Brands (Ounass)",len(inc_o))
+        st.metric("Decreased Brands (Ounass)",len(dec_o))
+        st.metric("Net Product Change (Ounass)",f"{df_time_comp['Ounass_Change'].sum():+,}")
+    with t_stat_col2:
+        st.metric("New Brands (Level Shoes)",len(new_l))
+        st.metric("Dropped Brands (Level Shoes)",len(drop_l))
+        st.metric("Increased Brands (Level Shoes)",len(inc_l))
+        st.metric("Decreased Brands (Level Shoes)",len(dec_l))
+        st.metric("Net Product Change (Level Shoes)",f"{df_time_comp['LevelShoes_Change'].sum():+,}")
+
     st.markdown("---"); st.subheader("Detailed Brand Changes"); tc_col1, tc_col2 = st.columns(2); height=250
     with tc_col1:
         st.write("**Ounass Changes**")
-        if not new_o.empty: st.write(f"New ({len(new_o)}):"); df=new_o[['Display_Brand','Ounass_Count_T2']].rename(columns={'Ounass_Count_T2':'Now'}).sort_values('Now',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height)
-        if not drop_o.empty: st.write(f"Dropped ({len(drop_o)}):"); df=drop_o[['Display_Brand','Ounass_Count_T1']].rename(columns={'Ounass_Count_T1':'Was'}).sort_values('Was',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height)
-        if not inc_o.empty: st.write(f"Increased ({len(inc_o)}):"); df=inc_o[['Display_Brand','Ounass_Count_T1','Ounass_Count_T2','Ounass_Change']].rename(columns={'Ounass_Count_T1':'Was','Ounass_Count_T2':'Now','Ounass_Change':'Chg'}).sort_values('Chg',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height)
-        if not dec_o.empty: st.write(f"Decreased ({len(dec_o)}):"); df=dec_o[['Display_Brand','Ounass_Count_T1','Ounass_Count_T2','Ounass_Change']].rename(columns={'Ounass_Count_T1':'Was','Ounass_Count_T2':'Now','Ounass_Change':'Chg'}).sort_values('Chg',ascending=True).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height)
-        if new_o.empty and drop_o.empty and inc_o.empty and dec_o.empty: st.info("No significant changes for Ounass.")
+        if not new_o.empty: st.write(f"New ({len(new_o)}):"); df=new_o[['Display_Brand','Ounass_Count_T2']].rename(columns={'Ounass_Count_T2':'Now'}).sort_values('Now',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height, use_container_width=True)
+        if not drop_o.empty: st.write(f"Dropped ({len(drop_o)}):"); df=drop_o[['Display_Brand','Ounass_Count_T1']].rename(columns={'Ounass_Count_T1':'Was'}).sort_values('Was',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height, use_container_width=True)
+        if not inc_o.empty: st.write(f"Increased ({len(inc_o)}):"); df=inc_o[['Display_Brand','Ounass_Count_T1','Ounass_Count_T2','Ounass_Change']].rename(columns={'Ounass_Count_T1':'Was','Ounass_Count_T2':'Now','Ounass_Change':'Chg'}).sort_values('Chg',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height, use_container_width=True)
+        if not dec_o.empty: st.write(f"Decreased ({len(dec_o)}):"); df=dec_o[['Display_Brand','Ounass_Count_T1','Ounass_Count_T2','Ounass_Change']].rename(columns={'Ounass_Count_T1':'Was','Ounass_Count_T2':'Now','Ounass_Change':'Chg'}).sort_values('Chg',ascending=True).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height, use_container_width=True)
+        if new_o.empty and drop_o.empty and inc_o.empty and dec_o.empty: st.info("No significant changes detected for Ounass between these snapshots.")
     with tc_col2:
         st.write("**Level Shoes Changes**")
-        if not new_l.empty: st.write(f"New ({len(new_l)}):"); df=new_l[['Display_Brand','LevelShoes_Count_T2']].rename(columns={'LevelShoes_Count_T2':'Now'}).sort_values('Now',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height)
-        if not drop_l.empty: st.write(f"Dropped ({len(drop_l)}):"); df=drop_l[['Display_Brand','LevelShoes_Count_T1']].rename(columns={'LevelShoes_Count_T1':'Was'}).sort_values('Was',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height)
-        if not inc_l.empty: st.write(f"Increased ({len(inc_l)}):"); df=inc_l[['Display_Brand','LevelShoes_Count_T1','LevelShoes_Count_T2','LevelShoes_Change']].rename(columns={'LevelShoes_Count_T1':'Was','LevelShoes_Count_T2':'Now','LevelShoes_Change':'Chg'}).sort_values('Chg',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height)
-        if not dec_l.empty: st.write(f"Decreased ({len(dec_l)}):"); df=dec_l[['Display_Brand','LevelShoes_Count_T1','LevelShoes_Count_T2','LevelShoes_Change']].rename(columns={'LevelShoes_Count_T1':'Was','LevelShoes_Count_T2':'Now','LevelShoes_Change':'Chg'}).sort_values('Chg',ascending=True).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height)
-        if new_l.empty and drop_l.empty and inc_l.empty and dec_l.empty: st.info("No significant changes for Level Shoes.")
+        if not new_l.empty: st.write(f"New ({len(new_l)}):"); df=new_l[['Display_Brand','LevelShoes_Count_T2']].rename(columns={'LevelShoes_Count_T2':'Now'}).sort_values('Now',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height, use_container_width=True)
+        if not drop_l.empty: st.write(f"Dropped ({len(drop_l)}):"); df=drop_l[['Display_Brand','LevelShoes_Count_T1']].rename(columns={'LevelShoes_Count_T1':'Was'}).sort_values('Was',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height, use_container_width=True)
+        if not inc_l.empty: st.write(f"Increased ({len(inc_l)}):"); df=inc_l[['Display_Brand','LevelShoes_Count_T1','LevelShoes_Count_T2','LevelShoes_Change']].rename(columns={'LevelShoes_Count_T1':'Was','LevelShoes_Count_T2':'Now','LevelShoes_Change':'Chg'}).sort_values('Chg',ascending=False).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height, use_container_width=True)
+        if not dec_l.empty: st.write(f"Decreased ({len(dec_l)}):"); df=dec_l[['Display_Brand','LevelShoes_Count_T1','LevelShoes_Count_T2','LevelShoes_Change']].rename(columns={'LevelShoes_Count_T1':'Was','LevelShoes_Count_T2':'Now','LevelShoes_Change':'Chg'}).sort_values('Chg',ascending=True).reset_index(drop=True); df.index+=1; st.dataframe(df,height=height, use_container_width=True)
+        if new_l.empty and drop_l.empty and inc_l.empty and dec_l.empty: st.info("No significant changes detected for Level Shoes between these snapshots.")
+
     st.markdown("---"); csv_buffer = io.StringIO(); cols_dl = ['Display_Brand','Ounass_Count_T1','Ounass_Count_T2','Ounass_Change','LevelShoes_Count_T1','LevelShoes_Count_T2','LevelShoes_Change']
-    df_time_comp[cols_dl].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0)
-    st.download_button(label=f"Download Time Comparison ({ts1_str} vs {ts2_str})",data=csv_buffer.getvalue(),file_name=f"time_comp_{st.session_state.time_comp_id1}_vs_{st.session_state.time_comp_id2}.csv",mime='text/csv',key='time_comp_dl_button')
+    # Ensure columns exist before download
+    if all(col in df_time_comp.columns for col in cols_dl):
+        df_time_comp[cols_dl].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0)
+        st.download_button(label=f"Download Time Comparison ({ts1_str} vs {ts2_str})",data=csv_buffer.getvalue(),file_name=f"time_comp_{st.session_state.time_comp_id1}_vs_{st.session_state.time_comp_id2}.csv",mime='text/csv',key='time_comp_dl_button')
+    else:
+        st.warning("Could not generate download file for time comparison due to missing columns.")
 
 
 # --- Main Application Flow ---
 confirm_id = st.session_state.get('confirm_delete_id')
 if confirm_id:
-    # (Delete confirmation logic remains the same)
+    # Delete confirmation logic
     st.warning(f"Are you sure you want to delete comparison ID {confirm_id}?")
     col_confirm, col_cancel, _ = st.columns([1,1,3])
     with col_confirm:
         if st.button("Yes, Delete", type="primary", key=f"confirm_delete_{confirm_id}"):
             if delete_comparison(confirm_id): st.success(f"Comparison ID {confirm_id} deleted."); st.session_state.confirm_delete_id = None; st.query_params.clear(); st.rerun()
-            else: st.error("Deletion failed."); st.session_state.confirm_delete_id = None
+            else: st.error("Deletion failed."); st.session_state.confirm_delete_id = None # Clear confirmation state even on failure
     with col_cancel:
         if st.button("Cancel", key=f"cancel_delete_{confirm_id}"): st.session_state.confirm_delete_id = None; st.rerun()
+
 elif 'df_time_comparison' in st.session_state and not st.session_state.df_time_comparison.empty:
+    # Display Time Comparison results if available
     display_time_comparison_results(st.session_state.df_time_comparison, st.session_state.get('time_comp_meta1',{}), st.session_state.get('time_comp_meta2',{}))
+
 elif viewing_saved_id:
+    # Load and display a specific saved comparison
     saved_meta, saved_df = load_specific_comparison(viewing_saved_id)
-    if saved_meta and saved_df is not None: display_all_results(None, None, saved_df, stats_title_prefix="Saved Comparison", is_saved_view=True, saved_meta=saved_meta)
-    else: st.error(f"Could not load comparison ID: {viewing_saved_id}.");
-    if st.button("Clear Invalid Saved View"): st.query_params.clear(); st.rerun()
+    if saved_meta and saved_df is not None:
+         display_all_results(None, None, saved_df, stats_title_prefix="Saved Comparison", is_saved_view=True, saved_meta=saved_meta)
+    else:
+         st.error(f"Could not load comparison ID: {viewing_saved_id}. It might have been deleted or there was an error.")
+         # Provide a button to clear the invalid view ID from the URL
+         if st.button("Clear Invalid Saved View"):
+             st.query_params.clear()
+             st.rerun()
+
 else:
+    # Live processing or initial state
     if process_button:
-        # (Processing logic remains the same...)
-        st.session_state.df_ounass = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']); st.session_state.df_levelshoes = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']); st.session_state.ounass_data = []; st.session_state.levelshoes_data = []; st.session_state.df_comparison_sorted = pd.DataFrame(); st.session_state.processed_ounass_url = ''
+        # Clear previous results before processing
+        st.session_state.df_ounass = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned'])
+        st.session_state.df_levelshoes = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned'])
+        st.session_state.ounass_data = []
+        st.session_state.levelshoes_data = []
+        st.session_state.df_comparison_sorted = pd.DataFrame()
+        st.session_state.processed_ounass_url = ''
+        # Also clear time comparison state when doing new live processing
+        st.session_state.df_time_comparison = pd.DataFrame()
+        st.session_state.time_comp_id1 = None
+        st.session_state.time_comp_id2 = None
+        st.session_state.selected_url_key_for_time_comp = None
+        st.session_state.time_comp_meta1 = {}
+        st.session_state.time_comp_meta2 = {}
+
+
+        # Process Ounass URL
         if st.session_state.ounass_url_input:
             with st.spinner("Processing Ounass URL..."):
                 st.session_state.processed_ounass_url = ensure_ounass_full_list_parameter(st.session_state.ounass_url_input)
                 ounass_html_content = fetch_html_content(st.session_state.processed_ounass_url)
                 if ounass_html_content:
                     st.session_state.ounass_data = process_ounass_html(ounass_html_content)
-                    if st.session_state.ounass_data: st.session_state.df_ounass = pd.DataFrame(st.session_state.ounass_data);
-                    if not st.session_state.df_ounass.empty: st.session_state.df_ounass['Brand_Cleaned'] = st.session_state.df_ounass['Brand'].apply(clean_brand_name)
+                    if st.session_state.ounass_data:
+                         st.session_state.df_ounass = pd.DataFrame(st.session_state.ounass_data);
+                         if not st.session_state.df_ounass.empty:
+                             st.session_state.df_ounass['Brand_Cleaned'] = st.session_state.df_ounass['Brand'].apply(clean_brand_name)
+                         else: st.warning("Ounass data structure yielded empty list.") # More specific warning
+                    # else: Handled by process_ounass_html warnings/errors
+                # else: Handled by fetch_html_content errors
+
+        # Process Level Shoes URL
         if st.session_state.levelshoes_url_input:
-             with st.spinner("Processing Level Shoes URL..."):
+             with st.spinner("Processing Level Shoes URL (using __NEXT_DATA__)..."):
                 levelshoes_html_content = fetch_html_content(st.session_state.levelshoes_url_input)
                 if levelshoes_html_content:
-                    st.session_state.levelshoes_data = process_levelshoes_html(levelshoes_html_content)
-                    if st.session_state.levelshoes_data: st.session_state.df_levelshoes = pd.DataFrame(st.session_state.levelshoes_data);
-                    if not st.session_state.df_levelshoes.empty: st.session_state.df_levelshoes['Brand_Cleaned'] = st.session_state.df_levelshoes['Brand'].apply(clean_brand_name)
-        if not st.session_state.df_ounass.empty and not st.session_state.df_levelshoes.empty:
-            df_o=st.session_state.df_ounass[['Brand','Count','Brand_Cleaned']].copy(); df_l=st.session_state.df_levelshoes[['Brand','Count','Brand_Cleaned']].copy(); df_comp=pd.merge(df_o,df_l,on='Brand_Cleaned',how='outer',suffixes=('_Ounass','_LevelShoes'));
-            df_comp['Ounass_Count']=df_comp['Count_Ounass'].fillna(0).astype(int); df_comp['LevelShoes_Count']=df_comp['Count_LevelShoes'].fillna(0).astype(int); df_comp['Difference']=df_comp['Ounass_Count']-df_comp['LevelShoes_Count'];
-            df_comp['Display_Brand']=np.where(df_comp['Ounass_Count']>0, df_comp['Brand_Ounass'], df_comp['Brand_LevelShoes']); df_comp['Display_Brand'].fillna(df_comp['Brand_Cleaned'], inplace=True);
-            final_cols=['Display_Brand','Brand_Cleaned','Ounass_Count','LevelShoes_Count','Difference','Brand_Ounass','Brand_LevelShoes']
-            for col in final_cols:
-                if col not in df_comp.columns: df_comp[col]=np.nan
-            st.session_state.df_comparison_sorted = df_comp[final_cols].sort_values(by=['Ounass_Count','LevelShoes_Count'], ascending=[False, False]).reset_index(drop=True)
-        else: st.session_state.df_comparison_sorted = pd.DataFrame()
-        st.session_state.df_time_comparison = pd.DataFrame(); st.session_state.time_comp_id1 = None; st.session_state.time_comp_id2 = None; st.session_state.selected_url_key_for_time_comp = None;
+                    st.session_state.levelshoes_data = process_levelshoes_html(levelshoes_html_content) # Use the updated function
+                    if st.session_state.levelshoes_data:
+                        st.session_state.df_levelshoes = pd.DataFrame(st.session_state.levelshoes_data);
+                        if not st.session_state.df_levelshoes.empty:
+                            st.session_state.df_levelshoes['Brand_Cleaned'] = st.session_state.df_levelshoes['Brand'].apply(clean_brand_name)
+                        else: st.warning("Level Shoes data structure yielded empty list.") # More specific warning
+                    # else: Handled by process_levelshoes_html warnings/errors
+                # else: Handled by fetch_html_content errors
 
+        # Create Comparison DataFrame if both were successful
+        if not st.session_state.df_ounass.empty and not st.session_state.df_levelshoes.empty:
+            with st.spinner("Generating comparison..."):
+                df_o = st.session_state.df_ounass[['Brand','Count','Brand_Cleaned']].copy()
+                df_l = st.session_state.df_levelshoes[['Brand','Count','Brand_Cleaned']].copy()
+                # Merge based on the cleaned brand name
+                df_comp = pd.merge(df_o, df_l, on='Brand_Cleaned', how='outer', suffixes=('_Ounass', '_LevelShoes'))
+
+                # Fill NaN counts with 0 and ensure integer type
+                df_comp['Ounass_Count'] = df_comp['Count_Ounass'].fillna(0).astype(int)
+                df_comp['LevelShoes_Count'] = df_comp['Count_LevelShoes'].fillna(0).astype(int)
+                df_comp['Difference'] = df_comp['Ounass_Count'] - df_comp['LevelShoes_Count']
+
+                # Determine the display brand (prefer Ounass if present, else LevelShoes, fallback to Cleaned)
+                df_comp['Display_Brand'] = np.where(df_comp['Ounass_Count'] > 0, df_comp['Brand_Ounass'], df_comp['Brand_LevelShoes'])
+                df_comp['Display_Brand'].fillna(df_comp['Brand_Cleaned'], inplace=True) # Fallback if only one side had it and name was NaN
+
+                # Select and order final columns
+                final_cols = ['Display_Brand','Brand_Cleaned','Ounass_Count','LevelShoes_Count','Difference','Brand_Ounass','Brand_LevelShoes']
+                # Ensure all final columns exist, adding NaNs if necessary (though merge should create them)
+                for col in final_cols:
+                    if col not in df_comp.columns:
+                        df_comp[col] = np.nan # Should typically not happen with the outer merge
+
+                # Sort the comparison results (e.g., by total count, then Ounass count)
+                df_comp['Total_Count'] = df_comp['Ounass_Count'] + df_comp['LevelShoes_Count']
+                st.session_state.df_comparison_sorted = df_comp[final_cols + ['Total_Count']].sort_values(
+                    by=['Total_Count', 'Ounass_Count', 'Display_Brand'],
+                    ascending=[False, False, True] # Sort descending by total, then Ounass, then alphabetically
+                ).reset_index(drop=True)
+        else:
+             # If one or both failed, ensure comparison is empty
+             st.session_state.df_comparison_sorted = pd.DataFrame()
+             if process_button: # Only show warning if user clicked Process
+                 if st.session_state.ounass_url_input and st.session_state.df_ounass.empty:
+                     st.warning("Could not process Ounass data. Comparison not generated.")
+                 if st.session_state.levelshoes_url_input and st.session_state.df_levelshoes.empty:
+                      st.warning("Could not process Level Shoes data. Comparison not generated.")
+
+
+    # Always get current state dataframes (could be populated by processing or empty)
     df_ounass_live = st.session_state.get('df_ounass', pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']))
     df_levelshoes_live = st.session_state.get('df_levelshoes', pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']))
     df_comparison_sorted_live = st.session_state.get('df_comparison_sorted', pd.DataFrame())
 
-    # Call display function for live data
+    # Call display function for live data (or lack thereof)
     display_all_results(df_ounass_live, df_levelshoes_live, df_comparison_sorted_live)
 
-    # Show initial message if needed
-    if not process_button and df_ounass_live.empty and df_levelshoes_live.empty:
+    # Show initial message if nothing has happened yet
+    if not process_button and df_ounass_live.empty and df_levelshoes_live.empty and df_comparison_sorted_live.empty and not viewing_saved_id and not confirm_id and st.session_state.df_time_comparison.empty:
         st.info("Enter URLs in the sidebar and click 'Process URLs' or select a saved comparison.")
+
+# --- END OF UPDATED FILE ---
