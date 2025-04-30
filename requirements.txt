@@ -1,8 +1,9 @@
-streamlit
-beautifulsoup4
-pandas
-thefuzz
 python-Levenshtein
+streamlit
+pandas
 requests
+beautifulsoup4
+thefuzz
 plotly
 numpy
+psycopg2-binary 
