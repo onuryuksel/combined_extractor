@@ -19,7 +19,7 @@ from collections import defaultdict
 import os # Potentially useful for local testing with env vars
 
 # --- App Configuration ---
-APP_VERSION = "2.5.2" # Updated version: Fixed SyntaxError in Ounass URL processing
+APP_VERSION = "2.5.3" # Updated version: Fixed IndentationError in display_all_results
 st.set_page_config(layout="wide", page_title="Ounass vs Level Shoes PLP Comparison")
 
 # --- App Title and Info ---
@@ -241,50 +241,26 @@ def fetch_html_content(url):
     except requests.exceptions.RequestException as e: st.error(f"Error fetching {url}: {e}"); return None
     except Exception as e: st.error(f"Unexpected error during fetch: {e}"); return None
 
-
 # --- Function to ensure Ounass URL has the correct parameter ---
-# !!! CORRECTED VERSION !!!
 def ensure_ounass_full_list_parameter(url):
     param_key = 'fh_maxdisplaynrvalues_designer'
     param_value = '-1'
     try:
-        # Initial check if URL is valid and for Ounass
-        if not url or 'ounass' not in urlparse(url).netloc.lower():
-            return url
-    except Exception:
-        # Return original URL if initial parsing fails
-        return url
-
+        if not url or 'ounass' not in urlparse(url).netloc.lower(): return url
+    except Exception: return url
     try:
-        # Parse the URL and query parameters
         parsed_url = urlparse(url)
         query_params = parse_qs(parsed_url.query, keep_blank_values=True)
-
-        # Determine if the parameter needs to be added or updated
-        needs_update = (param_key not in query_params or
-                        not query_params[param_key] or
-                        query_params[param_key][0] != param_value)
-
-        # --- Corrected Indentation Starts Here ---
+        needs_update = (param_key not in query_params or not query_params[param_key] or query_params[param_key][0] != param_value)
         if needs_update:
-            # Update the query parameters
             query_params[param_key] = [param_value]
-            # Encode the updated query parameters
             new_query_string = urlencode(query_params, doseq=True)
-            # Reconstruct the URL
             url_components = list(parsed_url)
-            url_components[4] = new_query_string # Index 4 is the query string
+            url_components[4] = new_query_string
             return urlunparse(url_components)
         else:
-            # Parameter is already correct, return original URL
             return url
-        # --- Corrected Indentation Ends Here ---
-
-    except Exception as e:
-        # Handle errors during the parameter update process
-        st.warning(f"Error processing Ounass URL parameters: {e}")
-        return url # Return original URL on error
-
+    except Exception as e: st.warning(f"Error processing Ounass URL parameters: {e}"); return url
 
 # --- URL Info Extraction Function ---
 def extract_info_from_url(url):
@@ -306,8 +282,6 @@ st.sidebar.caption(f"App Version: {APP_VERSION}")
 # --- Saved Comparisons Sidebar Section ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("Saved Comparisons")
-# Use viewing_saved_id_check defined earlier for consistency
-# viewing_saved_id_sidebar = st.query_params.get("view_id", [None])[0] # Check directly
 saved_comps_meta = load_saved_comparisons_meta()
 if viewing_saved_id_check and st.session_state.get('confirm_delete_id') != viewing_saved_id_check : # Use checked var
      if st.sidebar.button("<< Back to Live Processing", key="back_live", use_container_width=True):
@@ -387,10 +361,8 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
         stat_title_col, stat_save_col = st.columns([0.8, 0.2]);
         with stat_title_col: st.subheader(stats_title);
         with stat_save_col: st.write("");
-        # Changed button key to avoid conflict if saved view has same ID
-        if st.button("💾 Save", key=f"save_live_comp_confirm_{stats_title}", help="Save current comparison results", use_container_width=True):
-             oun_url = st.session_state.get('processed_ounass_url', st.session_state.get('ounass_url_input','')); ls_url = st.session_state.get('levelshoes_url_input', ''); df_save = st.session_state.df_comparison_sorted;
-             if save_comparison(oun_url, ls_url, df_save): st.success(f"Comparison saved! ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"); st.session_state.confirm_delete_id = None; st.rerun()
+        if st.button("💾 Save", key=f"save_live_comp_confirm_{stats_title}", help="Save current comparison results", use_container_width=True): oun_url = st.session_state.get('processed_ounass_url', st.session_state.get('ounass_url_input','')); ls_url = st.session_state.get('levelshoes_url_input', ''); df_save = st.session_state.df_comparison_sorted;
+        if save_comparison(oun_url, ls_url, df_save): st.success(f"Comparison saved! ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"); st.session_state.confirm_delete_id = None; st.rerun()
     else: st.subheader(stats_title);
     df_o_safe = df_ounass if df_ounass is not None and not df_ounass.empty else pd.DataFrame(); df_l_safe = df_levelshoes if df_levelshoes is not None and not df_levelshoes.empty else pd.DataFrame(); df_c_safe = df_comparison_sorted if df_comparison_sorted is not None and not df_comparison_sorted.empty else pd.DataFrame();
     total_ounass_brands = 0; total_levelshoes_brands = 0; total_ounass_products = 0; total_levelshoes_products = 0; common_brands_count = 0; ounass_only_count = 0; levelshoes_only_count = 0;
@@ -418,32 +390,45 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
             st.subheader("Ounass Results");
             if df_ounass is not None and not df_ounass.empty and 'Brand' in df_ounass.columns and 'Count' in df_ounass.columns: st.write(f"Brands Found: {len(df_ounass)}"); df_display = df_ounass.sort_values(by='Count', ascending=False).reset_index(drop=True); df_display.index += 1; st.dataframe(df_display[['Brand', 'Count']], height=400, use_container_width=True); csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button("Download Ounass List (CSV)", csv_buffer.getvalue(), 'ounass_brands.csv', 'text/csv', key='ounass_dl_disp');
             elif not st.session_state.get('df_ounass_processed', False): st.info("Enter Ounass URL and click 'Process URLs'.");
-            # Added condition to show warning only if processing was attempted
             elif process_button: st.warning("No data extracted from Ounass.")
-
         with col2:
             st.subheader("Level Shoes Results");
             if df_levelshoes is not None and not df_levelshoes.empty and 'Brand' in df_levelshoes.columns and 'Count' in df_levelshoes.columns: st.write(f"Brands Found: {len(df_levelshoes)}"); df_display = df_levelshoes.sort_values(by='Count', ascending=False).reset_index(drop=True); df_display.index += 1; st.dataframe(df_display[['Brand', 'Count']], height=400, use_container_width=True); csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button("Download Level Shoes List (CSV)", csv_buffer.getvalue(), 'levelshoes_brands.csv', 'text/csv', key='ls_dl_disp');
             elif not st.session_state.get('df_levelshoes_processed', False): st.info("Enter Level Shoes URL and click 'Process URLs'.");
-            # Added condition to show warning only if processing was attempted
             elif process_button: st.warning("No data extracted from Level Shoes.")
 
     if df_comparison_sorted is not None and not df_comparison_sorted.empty:
-        if not is_saved_view: st.markdown("---"); st.subheader("Ounass vs Level Shoes Brand Comparison"); df_display = df_comparison_sorted.copy(); df_display.index += 1; display_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']; missing_cols = [col for col in display_cols if col not in df_display.columns];
+        # --- Corrected Indentation Starts Here ---
+        if not is_saved_view:
+            st.markdown("---") # This separator is ok here
+        st.subheader("Ounass vs Level Shoes Brand Comparison")
+        df_display = df_comparison_sorted.copy(); df_display.index += 1; display_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']; missing_cols = [col for col in display_cols if col not in df_display.columns];
         if missing_cols: st.warning(f"Comp table missing: {', '.join(missing_cols)}"); st.dataframe(df_display, height=500, use_container_width=True);
-        else: st.dataframe(df_display[display_cols], height=500, use_container_width=True); st.markdown("---"); st.subheader("Visual Comparison"); viz_col1, viz_col2 = st.columns(2);
-        with viz_col1: st.write("**Brand Overlap**"); pie_data = pd.DataFrame({'Category': ['Common Brands', 'Ounass Only', 'Level Shoes Only'],'Count': [common_brands_count, ounass_only_count, levelshoes_only_count]}); pie_data = pie_data[pie_data['Count'] > 0];
-        if not pie_data.empty: fig_pie = px.pie(pie_data, names='Category', values='Count', title="Brand Presence", color_discrete_sequence=px.colors.qualitative.Pastel); fig_pie.update_traces(textposition='inside', textinfo='percent+label+value'); st.plotly_chart(fig_pie, use_container_width=True);
-        else: st.info("No data for overlap chart.");
-        with viz_col2: st.write("**Top 10 Largest Differences (Count)**");
-        if 'Difference' in df_comparison_sorted.columns and 'Display_Brand' in df_comparison_sorted.columns: top_pos = df_comparison_sorted[df_comparison_sorted['Difference'] > 0].nlargest(5, 'Difference'); top_neg = df_comparison_sorted[df_comparison_sorted['Difference'] < 0].nsmallest(5, 'Difference'); top_diff = pd.concat([top_pos, top_neg]).sort_values('Difference', ascending=False);
-        if not top_diff.empty: fig_diff = px.bar(top_diff, x='Display_Brand', y='Difference', title="Largest Differences (Ounass - LS)", labels={'Display_Brand': 'Brand', 'Difference': 'Product Count Diff'}, color='Difference', color_continuous_scale=px.colors.diverging.RdBu); fig_diff.update_layout(xaxis_title=None); st.plotly_chart(fig_diff, use_container_width=True);
-        else: st.info("No significant differences for chart.");
-        else: st.info("Difference data unavailable."); st.markdown("---"); st.subheader("Top 15 Brands Comparison (Total Products)");
+        else: st.dataframe(df_display[display_cols], height=500, use_container_width=True);
+
+        st.markdown("---") # Separator before Visual Comparison
+        st.subheader("Visual Comparison")
+        viz_col1, viz_col2 = st.columns(2);
+        with viz_col1:
+            st.write("**Brand Overlap**"); pie_data = pd.DataFrame({'Category': ['Common Brands', 'Ounass Only', 'Level Shoes Only'],'Count': [common_brands_count, ounass_only_count, levelshoes_only_count]}); pie_data = pie_data[pie_data['Count'] > 0];
+            if not pie_data.empty: fig_pie = px.pie(pie_data, names='Category', values='Count', title="Brand Presence", color_discrete_sequence=px.colors.qualitative.Pastel); fig_pie.update_traces(textposition='inside', textinfo='percent+label+value'); st.plotly_chart(fig_pie, use_container_width=True);
+            else: st.info("No data for overlap chart.");
+        with viz_col2:
+            st.write("**Top 10 Largest Differences (Count)**");
+            if 'Difference' in df_comparison_sorted.columns and 'Display_Brand' in df_comparison_sorted.columns: top_pos = df_comparison_sorted[df_comparison_sorted['Difference'] > 0].nlargest(5, 'Difference'); top_neg = df_comparison_sorted[df_comparison_sorted['Difference'] < 0].nsmallest(5, 'Difference'); top_diff = pd.concat([top_pos, top_neg]).sort_values('Difference', ascending=False);
+            if not top_diff.empty: fig_diff = px.bar(top_diff, x='Display_Brand', y='Difference', title="Largest Differences (Ounass - LS)", labels={'Display_Brand': 'Brand', 'Difference': 'Product Count Diff'}, color='Difference', color_continuous_scale=px.colors.diverging.RdBu); fig_diff.update_layout(xaxis_title=None); st.plotly_chart(fig_diff, use_container_width=True);
+            else: st.info("No significant differences for chart.");
+            else: st.info("Difference data unavailable."); # This else is correctly indented inside 'with viz_col2'
+
+        # --- Corrected Indentation For Following Elements ---
+        st.markdown("---") # This should be OUTSIDE the 'with viz_col2' block
+        st.subheader("Top 15 Brands Comparison (Total Products)")
         if not df_comparison_sorted.empty and all(c in df_comparison_sorted.columns for c in ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count']): df_comp_copy = df_comparison_sorted.copy(); df_comp_copy['Total_Count'] = df_comp_copy['Ounass_Count'] + df_comp_copy['LevelShoes_Count']; top_n = 15; top_brands = df_comp_copy.nlargest(top_n, 'Total_Count');
         if not top_brands.empty: melted = top_brands.melt(id_vars='Display_Brand', value_vars=['Ounass_Count', 'LevelShoes_Count'], var_name='Website', value_name='Product Count'); melted['Website'] = melted['Website'].str.replace('_Count', '').str.replace('LevelShoes','Level Shoes'); fig_top = px.bar(melted, x='Display_Brand', y='Product Count', color='Website', barmode='group', title=f"Top {top_n} Brands by Total Products", labels={'Display_Brand': 'Brand'}, category_orders={"Display_Brand": top_brands['Display_Brand'].tolist()}); fig_top.update_layout(xaxis_title=None); st.plotly_chart(fig_top, use_container_width=True);
         else: st.info(f"Not enough data for Top {top_n} chart.");
-        else: st.info(f"Comparison data unavailable for Top {top_n} chart."); st.markdown("---"); col_comp1, col_comp2 = st.columns(2); req_cols_exist = all(c in df_comparison_sorted.columns for c in ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']);
+        else: st.info(f"Comparison data unavailable for Top {top_n} chart.");
+
+        st.markdown("---"); col_comp1, col_comp2 = st.columns(2); req_cols_exist = all(c in df_comparison_sorted.columns for c in ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']);
         with col_comp1: st.subheader("Brands in Ounass Only");
         if req_cols_exist: df_f = df_comparison_sorted[(df_comparison_sorted['LevelShoes_Count'] == 0) & (df_comparison_sorted['Ounass_Count'] > 0)];
         if req_cols_exist and not df_f.empty: df_d = df_f[['Display_Brand', 'Ounass_Count']].sort_values('Ounass_Count', ascending=False).reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True);
@@ -451,7 +436,9 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
         with col_comp2: st.subheader("Brands in Level Shoes Only");
         if req_cols_exist: df_f = df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] == 0) & (df_comparison_sorted['LevelShoes_Count'] > 0)];
         if req_cols_exist and not df_f.empty: df_d = df_f[['Display_Brand', 'LevelShoes_Count']].sort_values('LevelShoes_Count', ascending=False).reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True);
-        elif req_cols_exist: st.info("No unique Level Shoes brands found."); else: st.info("Data unavailable."); st.markdown("---"); col_comp3, col_comp4 = st.columns(2);
+        elif req_cols_exist: st.info("No unique Level Shoes brands found."); else: st.info("Data unavailable.");
+
+        st.markdown("---"); col_comp3, col_comp4 = st.columns(2);
         with col_comp3: st.subheader("Common Brands: Ounass > Level Shoes");
         if req_cols_exist: df_f = df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] > 0) & (df_comparison_sorted['LevelShoes_Count'] > 0) & (df_comparison_sorted['Difference'] > 0)].sort_values('Difference', ascending=False);
         if req_cols_exist and not df_f.empty: df_d = df_f[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']].reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True);
@@ -459,9 +446,12 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
         with col_comp4: st.subheader("Common Brands: Level Shoes > Ounass");
         if req_cols_exist: df_f = df_comparison_sorted[(df_comparison_sorted['Ounass_Count'] > 0) & (df_comparison_sorted['LevelShoes_Count'] > 0) & (df_comparison_sorted['Difference'] < 0)].sort_values('Difference', ascending=True);
         if req_cols_exist and not df_f.empty: df_d = df_f[['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']].reset_index(drop=True); df_d.index += 1; st.dataframe(df_d, height=400, use_container_width=True);
-        elif req_cols_exist: st.info("No common brands where LS > Ounass."); else: st.info("Data unavailable."); st.markdown("---"); csv_buffer_comparison = io.StringIO(); dl_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference'];
+        elif req_cols_exist: st.info("No common brands where LS > Ounass."); else: st.info("Data unavailable.");
+
+        st.markdown("---"); csv_buffer_comparison = io.StringIO(); dl_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference'];
         if req_cols_exist: df_comparison_sorted[dl_cols].to_csv(csv_buffer_comparison, index=False, encoding='utf-8'); csv_buffer_comparison.seek(0); download_label = f"Download {'Saved' if is_saved_view else 'Current'} Comparison (CSV)"; view_id_part = saved_meta['id'] if is_saved_view and saved_meta else 'live'; download_key = f"comp_dl_button_{'saved' if is_saved_view else 'live'}_{view_id_part}"; filename_desc = f"{detected_gender or 'All'}_{detected_category or 'All'}".replace(' > ','-').replace(' ','_').lower(); download_filename = f"brand_comparison_{filename_desc}_{view_id_part}.csv".replace('?_?', 'all_all'); st.download_button(download_label, csv_buffer_comparison.getvalue(), download_filename, 'text/csv', key=download_key);
         else: st.warning("Could not generate download: missing columns.");
+    # --- End Comparison Section ---
     elif process_button and not is_saved_view: st.markdown("---"); st.warning("Comparison could not be generated. Check individual results.");
 
 
@@ -534,7 +524,8 @@ elif viewing_saved_id:
         if st.button("Clear Invalid Saved View URL"): st.query_params.clear(); st.rerun()
 
 else: # Live processing mode
-    if process_button: # Check if button (defined above conditionally) was clicked
+    # process_button is defined conditionally earlier based on viewing_saved_id_check
+    if process_button: # Check if button was clicked (only possible if not viewing saved)
         st.session_state.df_ounass = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']); st.session_state.df_levelshoes = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned'])
         st.session_state.ounass_data = []; st.session_state.levelshoes_data = []; st.session_state.df_comparison_sorted = pd.DataFrame(); st.session_state.processed_ounass_url = ''
         st.session_state.df_time_comparison = pd.DataFrame(); st.session_state.time_comp_id1 = None; st.session_state.time_comp_id2 = None; st.session_state.selected_url_key_for_time_comp = None; st.session_state.time_comp_meta1 = {}; st.session_state.time_comp_meta2 = {}
