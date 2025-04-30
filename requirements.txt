@@ -1,0 +1,10 @@
+streamlit
+beautifulsoup4
+pandas
+thefuzz
+python-Levenshtein
+requests
+plotly
+numpy
+selenium
+webdriver-manager # ChromeDriver'ı otomatik yönetmek için
