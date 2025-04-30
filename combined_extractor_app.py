@@ -19,7 +19,7 @@ from collections import defaultdict
 import os # Potentially useful for local testing with env vars
 
 # --- App Configuration ---
-APP_VERSION = "2.5.1" # Updated version: Hide inputs when viewing saved
+APP_VERSION = "2.5.2" # Updated version: Fixed SyntaxError in Ounass URL processing
 st.set_page_config(layout="wide", page_title="Ounass vs Level Shoes PLP Comparison")
 
 # --- App Title and Info ---
@@ -28,9 +28,7 @@ st.write("Enter Product Listing Page (PLP) URLs from Ounass and Level Shoes (Wom
 st.info("Ensure the URLs point to the relevant listing pages. For Ounass, the tool will attempt to load all designers. Level Shoes extraction uses the new __NEXT_DATA__ method. Comparison history is now stored externally.")
 
 # --- Session State Initialization ---
-# (Keep this section as is)
 if 'ounass_data' not in st.session_state: st.session_state.ounass_data = []
-# ... (rest of session state initializations remain the same) ...
 if 'levelshoes_data' not in st.session_state: st.session_state.levelshoes_data = []
 if 'df_ounass' not in st.session_state: st.session_state.df_ounass = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned'])
 if 'df_levelshoes' not in st.session_state: st.session_state.df_levelshoes = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned'])
@@ -45,44 +43,27 @@ if 'time_comp_id2' not in st.session_state: st.session_state.time_comp_id2 = Non
 if 'selected_url_key_for_time_comp' not in st.session_state: st.session_state.selected_url_key_for_time_comp = None
 if 'time_comp_meta1' not in st.session_state: st.session_state.time_comp_meta1 = {}
 if 'time_comp_meta2' not in st.session_state: st.session_state.time_comp_meta2 = {}
+if 'df_ounass_processed' not in st.session_state: st.session_state.df_ounass_processed = False
+if 'df_levelshoes_processed' not in st.session_state: st.session_state.df_levelshoes_processed = False
 
 
 # --- URL Input Section (Show only when not viewing saved) ---
-# Check if we are viewing a specific saved comparison directly from query params
-# because viewing_saved_id might be set later in the main flow
 viewing_saved_id_check = st.query_params.get("view_id", [None])[0]
-
 process_button = False # Default value
 if not viewing_saved_id_check: # Only show inputs if NOT viewing a saved comparison
     st.markdown("---") # Separator
     st.subheader("Enter URLs to Compare")
-
     col1, col2 = st.columns(2)
     with col1:
-        st.session_state.ounass_url_input = st.text_input(
-            "Ounass URL",
-            key="ounass_url_widget_main",
-            value=st.session_state.ounass_url_input,
-            placeholder="https://www.ounass.ae/..."
-        )
+        st.session_state.ounass_url_input = st.text_input("Ounass URL", key="ounass_url_widget_main", value=st.session_state.ounass_url_input, placeholder="https://www.ounass.ae/...")
     with col2:
-        st.session_state.levelshoes_url_input = st.text_input(
-            "Level Shoes URL",
-            key="levelshoes_url_widget_main",
-            value=st.session_state.levelshoes_url_input,
-            placeholder="https://www.levelshoes.com/..."
-        )
-
-    process_button = st.button(
-            "Process URLs",
-            key="process_button_main",
-        )
+        st.session_state.levelshoes_url_input = st.text_input("Level Shoes URL", key="levelshoes_url_widget_main", value=st.session_state.levelshoes_url_input, placeholder="https://www.levelshoes.com/...")
+    process_button = st.button("Process URLs", key="process_button_main")
     st.markdown("---") # Separator before results
 # --- End URL Input Section ---
 
 
 # --- Database Setup & Functions (PostgreSQL Version) ---
-# (Keep Database functions as they were in the previous version)
 @st.cache_resource
 def get_connection_details():
     try:
@@ -186,7 +167,6 @@ def delete_comparison(comp_id):
     return success
 
 # --- Helper Functions ---
-# (Keep as is)
 def clean_brand_name(brand_name):
     if not isinstance(brand_name, str): return ""
     cleaned = brand_name.upper().replace('-', '').replace('&', '').replace('.', '').replace("'", '').replace(" ", '')
@@ -197,7 +177,6 @@ def custom_scorer(s1, s2):
     scores = [fuzz.ratio(s1, s2), fuzz.partial_ratio(s1, s2), fuzz.token_set_ratio(s1, s2), fuzz.token_sort_ratio(s1, s2)]; return max(scores)
 
 # --- HTML Processing Functions ---
-# (Keep as is)
 def process_ounass_html(html_content):
     soup = BeautifulSoup(html_content, 'html.parser'); data = []
     try:
@@ -255,7 +234,6 @@ def process_levelshoes_html(html_content):
     except Exception as e: st.error(f"Level Shoes Error: Unexpected error during processing - {e}"); return []
 
 # --- Function to fetch HTML content from URL ---
-# (Keep as is)
 def fetch_html_content(url):
     if not url: st.error("Fetch error: URL cannot be empty."); return None
     try: headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9', 'Connection': 'keep-alive' }; response = requests.get(url, headers=headers, timeout=30); response.raise_for_status(); return response.text
@@ -263,20 +241,52 @@ def fetch_html_content(url):
     except requests.exceptions.RequestException as e: st.error(f"Error fetching {url}: {e}"); return None
     except Exception as e: st.error(f"Unexpected error during fetch: {e}"); return None
 
+
 # --- Function to ensure Ounass URL has the correct parameter ---
-# (Keep as is)
+# !!! CORRECTED VERSION !!!
 def ensure_ounass_full_list_parameter(url):
-    param_key, param_value = 'fh_maxdisplaynrvalues_designer', '-1';
+    param_key = 'fh_maxdisplaynrvalues_designer'
+    param_value = '-1'
     try:
-        if not url or 'ounass' not in urlparse(url).netloc.lower(): return url
-    except Exception: return url
-    try: parsed_url = urlparse(url); query_params = parse_qs(parsed_url.query, keep_blank_values=True); needs_update = param_key not in query_params or not query_params[param_key] or query_params[param_key][0] != param_value;
-    if needs_update: query_params[param_key] = [param_value]; new_query_string = urlencode(query_params, doseq=True); url_components = list(parsed_url); url_components[4] = new_query_string; return urlunparse(url_components)
-    else: return url
-    except Exception as e: st.warning(f"Error processing Ounass URL: {e}"); return url
+        # Initial check if URL is valid and for Ounass
+        if not url or 'ounass' not in urlparse(url).netloc.lower():
+            return url
+    except Exception:
+        # Return original URL if initial parsing fails
+        return url
+
+    try:
+        # Parse the URL and query parameters
+        parsed_url = urlparse(url)
+        query_params = parse_qs(parsed_url.query, keep_blank_values=True)
+
+        # Determine if the parameter needs to be added or updated
+        needs_update = (param_key not in query_params or
+                        not query_params[param_key] or
+                        query_params[param_key][0] != param_value)
+
+        # --- Corrected Indentation Starts Here ---
+        if needs_update:
+            # Update the query parameters
+            query_params[param_key] = [param_value]
+            # Encode the updated query parameters
+            new_query_string = urlencode(query_params, doseq=True)
+            # Reconstruct the URL
+            url_components = list(parsed_url)
+            url_components[4] = new_query_string # Index 4 is the query string
+            return urlunparse(url_components)
+        else:
+            # Parameter is already correct, return original URL
+            return url
+        # --- Corrected Indentation Ends Here ---
+
+    except Exception as e:
+        # Handle errors during the parameter update process
+        st.warning(f"Error processing Ounass URL parameters: {e}")
+        return url # Return original URL on error
+
 
 # --- URL Info Extraction Function ---
-# (Keep as is)
 def extract_info_from_url(url):
     try:
         if not url: return None, None; parsed = urlparse(url); ignore_segments = ['ae', 'com', 'en', 'shop', 'category', 'all', 'view-all', 'plp', 'sale']; path_segments = [s for s in parsed.path.lower().split('/') if s and s not in ignore_segments];
@@ -298,7 +308,6 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Saved Comparisons")
 # Use viewing_saved_id_check defined earlier for consistency
 # viewing_saved_id_sidebar = st.query_params.get("view_id", [None])[0] # Check directly
-# (The rest of the sidebar logic using load_saved_comparisons_meta remains the same)
 saved_comps_meta = load_saved_comparisons_meta()
 if viewing_saved_id_check and st.session_state.get('confirm_delete_id') != viewing_saved_id_check : # Use checked var
      if st.sidebar.button("<< Back to Live Processing", key="back_live", use_container_width=True):
@@ -357,7 +366,6 @@ else:
 
 
 # --- Unified Display Function ---
-# (Keep as is)
 def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_title_prefix="Overall Statistics", is_saved_view=False, saved_meta=None):
     stats_title = stats_title_prefix; detected_gender, detected_category = None, None;
     if is_saved_view and saved_meta:
@@ -379,8 +387,10 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
         stat_title_col, stat_save_col = st.columns([0.8, 0.2]);
         with stat_title_col: st.subheader(stats_title);
         with stat_save_col: st.write("");
-        if st.button("💾 Save", key="save_live_comp_confirm", help="Save current comparison results", use_container_width=True): oun_url = st.session_state.get('processed_ounass_url', st.session_state.get('ounass_url_input','')); ls_url = st.session_state.get('levelshoes_url_input', ''); df_save = st.session_state.df_comparison_sorted;
-        if save_comparison(oun_url, ls_url, df_save): st.success(f"Comparison saved! ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"); st.session_state.confirm_delete_id = None; st.rerun()
+        # Changed button key to avoid conflict if saved view has same ID
+        if st.button("💾 Save", key=f"save_live_comp_confirm_{stats_title}", help="Save current comparison results", use_container_width=True):
+             oun_url = st.session_state.get('processed_ounass_url', st.session_state.get('ounass_url_input','')); ls_url = st.session_state.get('levelshoes_url_input', ''); df_save = st.session_state.df_comparison_sorted;
+             if save_comparison(oun_url, ls_url, df_save): st.success(f"Comparison saved! ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"); st.session_state.confirm_delete_id = None; st.rerun()
     else: st.subheader(stats_title);
     df_o_safe = df_ounass if df_ounass is not None and not df_ounass.empty else pd.DataFrame(); df_l_safe = df_levelshoes if df_levelshoes is not None and not df_levelshoes.empty else pd.DataFrame(); df_c_safe = df_comparison_sorted if df_comparison_sorted is not None and not df_comparison_sorted.empty else pd.DataFrame();
     total_ounass_brands = 0; total_levelshoes_brands = 0; total_ounass_products = 0; total_levelshoes_products = 0; common_brands_count = 0; ounass_only_count = 0; levelshoes_only_count = 0;
@@ -402,16 +412,25 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
         else: st.metric("Common Brands", "N/A"); st.metric("Ounass Only", "N/A"); st.metric("Level Shoes Only", "N/A");
         if not is_saved_view and (st.session_state.get('ounass_url_input') or st.session_state.get('levelshoes_url_input')): st.caption("Comparison requires data from both sites.");
     st.write(""); st.markdown("---");
-    if not is_saved_view: col1, col2 = st.columns(2);
-    with col1: st.subheader("Ounass Results");
-    if df_ounass is not None and not df_ounass.empty and 'Brand' in df_ounass.columns and 'Count' in df_ounass.columns: st.write(f"Brands Found: {len(df_ounass)}"); df_display = df_ounass.sort_values(by='Count', ascending=False).reset_index(drop=True); df_display.index += 1; st.dataframe(df_display[['Brand', 'Count']], height=400, use_container_width=True); csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button("Download Ounass List (CSV)", csv_buffer.getvalue(), 'ounass_brands.csv', 'text/csv', key='ounass_dl_disp');
-    elif not st.session_state.get('df_ounass_processed', False) and not is_saved_view: st.info("Enter Ounass URL and click 'Process URLs'.");
-    with col2: st.subheader("Level Shoes Results");
-    if df_levelshoes is not None and not df_levelshoes.empty and 'Brand' in df_levelshoes.columns and 'Count' in df_levelshoes.columns: st.write(f"Brands Found: {len(df_levelshoes)}"); df_display = df_levelshoes.sort_values(by='Count', ascending=False).reset_index(drop=True); df_display.index += 1; st.dataframe(df_display[['Brand', 'Count']], height=400, use_container_width=True); csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button("Download Level Shoes List (CSV)", csv_buffer.getvalue(), 'levelshoes_brands.csv', 'text/csv', key='ls_dl_disp');
-    elif not st.session_state.get('df_levelshoes_processed', False) and not is_saved_view: st.info("Enter Level Shoes URL and click 'Process URLs'.");
+    if not is_saved_view:
+        col1, col2 = st.columns(2);
+        with col1:
+            st.subheader("Ounass Results");
+            if df_ounass is not None and not df_ounass.empty and 'Brand' in df_ounass.columns and 'Count' in df_ounass.columns: st.write(f"Brands Found: {len(df_ounass)}"); df_display = df_ounass.sort_values(by='Count', ascending=False).reset_index(drop=True); df_display.index += 1; st.dataframe(df_display[['Brand', 'Count']], height=400, use_container_width=True); csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button("Download Ounass List (CSV)", csv_buffer.getvalue(), 'ounass_brands.csv', 'text/csv', key='ounass_dl_disp');
+            elif not st.session_state.get('df_ounass_processed', False): st.info("Enter Ounass URL and click 'Process URLs'.");
+            # Added condition to show warning only if processing was attempted
+            elif process_button: st.warning("No data extracted from Ounass.")
+
+        with col2:
+            st.subheader("Level Shoes Results");
+            if df_levelshoes is not None and not df_levelshoes.empty and 'Brand' in df_levelshoes.columns and 'Count' in df_levelshoes.columns: st.write(f"Brands Found: {len(df_levelshoes)}"); df_display = df_levelshoes.sort_values(by='Count', ascending=False).reset_index(drop=True); df_display.index += 1; st.dataframe(df_display[['Brand', 'Count']], height=400, use_container_width=True); csv_buffer = io.StringIO(); df_display[['Brand', 'Count']].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button("Download Level Shoes List (CSV)", csv_buffer.getvalue(), 'levelshoes_brands.csv', 'text/csv', key='ls_dl_disp');
+            elif not st.session_state.get('df_levelshoes_processed', False): st.info("Enter Level Shoes URL and click 'Process URLs'.");
+            # Added condition to show warning only if processing was attempted
+            elif process_button: st.warning("No data extracted from Level Shoes.")
+
     if df_comparison_sorted is not None and not df_comparison_sorted.empty:
         if not is_saved_view: st.markdown("---"); st.subheader("Ounass vs Level Shoes Brand Comparison"); df_display = df_comparison_sorted.copy(); df_display.index += 1; display_cols = ['Display_Brand', 'Ounass_Count', 'LevelShoes_Count', 'Difference']; missing_cols = [col for col in display_cols if col not in df_display.columns];
-        if missing_cols: st.warning(f"Comparison table missing columns: {', '.join(missing_cols)}"); st.dataframe(df_display, height=500, use_container_width=True);
+        if missing_cols: st.warning(f"Comp table missing: {', '.join(missing_cols)}"); st.dataframe(df_display, height=500, use_container_width=True);
         else: st.dataframe(df_display[display_cols], height=500, use_container_width=True); st.markdown("---"); st.subheader("Visual Comparison"); viz_col1, viz_col2 = st.columns(2);
         with viz_col1: st.write("**Brand Overlap**"); pie_data = pd.DataFrame({'Category': ['Common Brands', 'Ounass Only', 'Level Shoes Only'],'Count': [common_brands_count, ounass_only_count, levelshoes_only_count]}); pie_data = pie_data[pie_data['Count'] > 0];
         if not pie_data.empty: fig_pie = px.pie(pie_data, names='Category', values='Count', title="Brand Presence", color_discrete_sequence=px.colors.qualitative.Pastel); fig_pie.update_traces(textposition='inside', textinfo='percent+label+value'); st.plotly_chart(fig_pie, use_container_width=True);
@@ -445,8 +464,8 @@ def display_all_results(df_ounass, df_levelshoes, df_comparison_sorted, stats_ti
         else: st.warning("Could not generate download: missing columns.");
     elif process_button and not is_saved_view: st.markdown("---"); st.warning("Comparison could not be generated. Check individual results.");
 
+
 # --- Time Comparison Display Function ---
-# (Keep as is)
 def display_time_comparison_results(df_time_comp, meta1, meta2):
     st.markdown("---"); st.subheader("Snapshot Comparison Over Time")
     ts_format = '%Y-%m-%d %H:%M'; ts1_str, ts2_str = "N/A", "N/A"; id1, id2 = meta1.get('id','N/A'), meta2.get('id','N/A')
@@ -487,12 +506,9 @@ def display_time_comparison_results(df_time_comp, meta1, meta2):
     if all(col in df_time_comp.columns for col in req_time_cols): df_time_comp[req_time_cols].to_csv(csv_buffer, index=False, encoding='utf-8'); csv_buffer.seek(0); st.download_button(label=f"Download Time Comparison ({ts1_str} vs {ts2_str})", data=csv_buffer.getvalue(), file_name=f"time_comparison_{id1}_vs_{id2}.csv", mime='text/csv', key='time_comp_dl_button');
     else: st.warning("Could not generate download: missing data.");
 
+
 # --- Main Application Flow ---
-
-# Initialize DB if needed
-init_db()
-
-# Get state variables
+init_db() # Ensure table exists on startup
 confirm_id = st.session_state.get('confirm_delete_id')
 viewing_saved_id = st.query_params.get("view_id", [None])[0] # Use the actual value for main logic
 
@@ -512,7 +528,6 @@ elif 'df_time_comparison' in st.session_state and not st.session_state.df_time_c
 elif viewing_saved_id:
     saved_meta, saved_df = load_specific_comparison(viewing_saved_id)
     if saved_meta and saved_df is not None:
-        # Display saved results (URL inputs are hidden by the logic at the top)
         display_all_results(None, None, saved_df, stats_title_prefix="Saved Comparison Details", is_saved_view=True, saved_meta=saved_meta)
     else:
         st.error(f"Could not load comparison ID: {viewing_saved_id}.");
@@ -520,7 +535,6 @@ elif viewing_saved_id:
 
 else: # Live processing mode
     if process_button: # Check if button (defined above conditionally) was clicked
-        # (Processing logic remains the same)
         st.session_state.df_ounass = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']); st.session_state.df_levelshoes = pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned'])
         st.session_state.ounass_data = []; st.session_state.levelshoes_data = []; st.session_state.df_comparison_sorted = pd.DataFrame(); st.session_state.processed_ounass_url = ''
         st.session_state.df_time_comparison = pd.DataFrame(); st.session_state.time_comp_id1 = None; st.session_state.time_comp_id2 = None; st.session_state.selected_url_key_for_time_comp = None; st.session_state.time_comp_meta1 = {}; st.session_state.time_comp_meta2 = {}
@@ -559,12 +573,13 @@ else: # Live processing mode
              if process_button: # Show warnings only if button was pressed
                  if st.session_state.ounass_url_input and not st.session_state.df_ounass_processed: st.warning("Could not process Ounass. Comparison not generated.")
                  if st.session_state.levelshoes_url_input and not st.session_state.df_levelshoes_processed: st.warning("Could not process Level Shoes. Comparison not generated.")
-        st.rerun() # Rerun to show results
+        st.rerun() # Rerun after processing to display results
 
     # Display current live data (or initial empty state)
     df_ounass_live = st.session_state.get('df_ounass', pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']))
     df_levelshoes_live = st.session_state.get('df_levelshoes', pd.DataFrame(columns=['Brand', 'Count', 'Brand_Cleaned']))
     df_comparison_sorted_live = st.session_state.get('df_comparison_sorted', pd.DataFrame())
     display_all_results(df_ounass_live, df_levelshoes_live, df_comparison_sorted_live, stats_title_prefix="Current Comparison")
+
 
 # --- END OF UPDATED FILE ---
