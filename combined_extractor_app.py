@@ -15,7 +15,7 @@ import json
 from collections import defaultdict
 
 # --- App Configuration ---
-APP_VERSION = "2.4.5" # Added subcategory detection
+APP_VERSION = "2.4.7" # Added subcategory detection
 st.set_page_config(layout="wide", page_title="Ounass vs Level Shoes PLP Comparison")
 
 # --- App Title and Info ---
