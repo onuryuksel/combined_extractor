@@ -17,7 +17,7 @@ import json # Added for the new Level Shoes processing
 from collections import defaultdict
 
 # --- App Configuration ---
-APP_VERSION = "2.4.8" # Updated version to reflect LevelShoes fix
+APP_VERSION = "2.4.8666" # Updated version to reflect LevelShoes fix
 st.set_page_config(layout="wide", page_title="Ounass vs Level Shoes PLP Comparison")
 
 # --- App Title and Info ---
