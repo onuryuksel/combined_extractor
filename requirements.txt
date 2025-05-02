@@ -6,4 +6,5 @@ beautifulsoup4
 thefuzz
 plotly
 numpy
-psycopg2-binary 
+psycopg2-binary
+pytz
